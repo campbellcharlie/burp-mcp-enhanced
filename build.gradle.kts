@@ -46,7 +46,18 @@ dependencies {
     implementation(libs.bundles.ktor.server)
     implementation(libs.kotlin.stdlib)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.mcp.kotlin.sdk)
+
+    // SQLite for traffic logging
+    implementation(libs.sqlite.jdbc)
+
+    // JWT processing
+    implementation(libs.bundles.jjwt)
+
+    // Utilities
+    implementation(libs.json.path)
+    implementation(libs.diff.utils)
 
     testImplementation(libs.bundles.test.framework)
     testImplementation(libs.bundles.ktor.test)
@@ -105,7 +116,7 @@ tasks {
                     "Implementation-Title" to project.name,
                     "Implementation-Version" to project.version,
                     "Implementation-Vendor" to "PortSwigger",
-                    "Built-By" to System.getProperty("user.name"),
+                    "Built-By" to "PortSwigger",
                     "Built-Date" to Instant.now().toString(),
                     "Built-JDK" to "${System.getProperty("java.version")} (${System.getProperty("java.vendor")} ${
                         System.getProperty("java.vm.version")

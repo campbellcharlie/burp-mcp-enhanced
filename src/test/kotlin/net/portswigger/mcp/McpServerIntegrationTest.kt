@@ -17,7 +17,7 @@ import java.net.ServerSocket
 class McpServerIntegrationTest {
     private val client = TestSseMcpClient()
     private val api = mockk<MontoyaApi>(relaxed = true)
-    private val serverManager = KtorServerManager(api)
+    private val serverManager = KtorServerManager(api, null, null)
     private val testPort = findAvailablePort()
     private val persistedObject = mockk<PersistedObject>()
     private var serverStarted = false

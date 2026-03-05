@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi
 import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.PAUSED
 import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.RUNNING
 import burp.api.montoya.core.BurpSuiteEdition
+import burp.api.montoya.core.ByteArray
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpHeader
@@ -18,6 +19,7 @@ import net.portswigger.mcp.security.HistoryAccessSecurity
 import net.portswigger.mcp.security.HistoryAccessType
 import net.portswigger.mcp.security.HttpRequestSecurity
 import java.awt.KeyboardFocusManager
+import java.util.Base64
 import java.util.regex.Pattern
 import javax.swing.JTextArea
 
@@ -41,6 +43,26 @@ private fun truncateIfNeeded(serialized: String): String {
     }
 }
 
+private fun decodeBase64ToBytes(b64: String): kotlin.ByteArray =
+    Base64.getDecoder().decode(b64.trim())
+
+private fun renderBytesForDisplay(bytes: kotlin.ByteArray, maxLen: Int = 200): String {
+    val shown = bytes.take(maxLen)
+    val sb = StringBuilder()
+    for (b in shown) {
+        val v = b.toInt() and 0xFF
+        when (v) {
+            0x0D -> sb.append("\\r")
+            0x0A -> sb.append("\\n")
+            0x09 -> sb.append("\\t")
+            in 0x20..0x7E -> sb.append(v.toChar())
+            else -> sb.append(String.format("\\x%02x", v))
+        }
+    }
+    if (bytes.size > maxLen) sb.append("... (${bytes.size} bytes)")
+    return sb.toString()
+}
+
 fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
@@ -57,6 +79,35 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
 
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
+        val response = api.http().sendRequest(request)
+
+        response?.toString() ?: "<no response>"
+    }
+
+    mcpTool<SendHttp1RequestRaw>(
+        "Issues an HTTP/1.1 request from base64-encoded raw bytes and returns the response. " +
+            "Use this when you need byte-level control beyond the string-based send_http1_request."
+    ) {
+        val requestBytes = decodeBase64ToBytes(contentBase64)
+
+        val allowed = runBlocking {
+            val preview = buildString {
+                appendLine("RAW HTTP/1.1 request bytes (base64 decoded):")
+                appendLine("Target: $targetHostname:$targetPort")
+                appendLine("Bytes: ${requestBytes.size}")
+                appendLine()
+                append(renderBytesForDisplay(requestBytes, maxLen = 2000))
+            }
+            HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, preview, api)
+        }
+        if (!allowed) {
+            api.logging().logToOutput("MCP RAW HTTP request denied: $targetHostname:$targetPort")
+            return@mcpTool "Send RAW HTTP request denied by Burp Suite"
+        }
+
+        api.logging().logToOutput("MCP RAW HTTP/1.1 request: $targetHostname:$targetPort")
+
+        val request = HttpRequest.httpRequest(toMontoyaService(), ByteArray.byteArray(*requestBytes))
         val response = api.http().sendRequest(request)
 
         response?.toString() ?: "<no response>"
@@ -110,6 +161,122 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
         val response = api.http().sendRequest(request, HttpMode.HTTP_2)
 
+        response?.toString() ?: "<no response>"
+    }
+
+    mcpTool<SendHttp2RequestRaw>(
+        "Issues an HTTP/2 request that supports raw (base64) header name/value bytes. " +
+            "Useful for advanced HTTP/2 desync/request-tunnelling research where header bytes must be non-standard."
+    ) {
+        if (!usesHttps) {
+            return@mcpTool "Error: HTTP/2 tool requires TLS (usesHttps=true) in this implementation."
+        }
+
+        val orderedPseudoHeaderNames = listOf(":scheme", ":method", ":path", ":authority")
+
+        val fixedPseudoHeaders = LinkedHashMap<String, String>().apply {
+            orderedPseudoHeaderNames.forEach { name ->
+                val value = pseudoHeaders[name.removePrefix(":")] ?: pseudoHeaders[name]
+                if (value != null) {
+                    put(name, value)
+                }
+            }
+
+            pseudoHeaders.forEach { (key, value) ->
+                val properKey = if (key.startsWith(":")) key else ":$key"
+                if (!containsKey(properKey)) {
+                    put(properKey, value)
+                }
+            }
+        }
+
+        val rawPseudoHeaderPairs = rawPseudoHeaders.map { h ->
+            val nameBytes = decodeBase64ToBytes(h.nameBase64)
+            val valueBytes = decodeBase64ToBytes(h.valueBase64)
+            Triple(nameBytes, valueBytes, h)
+        }
+
+        // Any pseudo headers present in raw form should override their string equivalents.
+        val rawPseudoHeaderNamesLower = rawPseudoHeaderPairs.map { (nameBytes, _, _) ->
+            String(nameBytes, Charsets.ISO_8859_1).lowercase()
+        }.toSet()
+
+        val rawHeaderPairs = rawHeaders.map { h ->
+            val nameBytes = decodeBase64ToBytes(h.nameBase64)
+            val valueBytes = decodeBase64ToBytes(h.valueBase64)
+            Triple(nameBytes, valueBytes, h)
+        }
+
+        // Compatibility: allow callers to provide pseudo headers via rawHeaders (tool schema may not expose
+        // rawPseudoHeaders yet). We detect raw header names beginning with ":" and treat them as pseudo headers,
+        // inserting them before regular headers and overriding any string pseudo headers with the same name.
+        val (rawPseudoFromRawHeaders, rawRegularHeaders) = rawHeaderPairs.partition { (nameBytes, _, _) ->
+            String(nameBytes, Charsets.ISO_8859_1).startsWith(":")
+        }
+
+        val effectiveRawPseudoHeaderPairs = rawPseudoHeaderPairs + rawPseudoFromRawHeaders
+        val effectiveRawPseudoHeaderNamesLower = effectiveRawPseudoHeaderPairs.map { (nameBytes, _, _) ->
+            String(nameBytes, Charsets.ISO_8859_1).lowercase()
+        }.toSet()
+
+        val http2RequestDisplay = buildString {
+            // Display effective pseudo headers (raw pseudo headers override string ones).
+            fixedPseudoHeaders.forEach { (k, v) ->
+                if (!effectiveRawPseudoHeaderNamesLower.contains(k.lowercase())) {
+                    appendLine("$k: $v")
+                }
+            }
+            effectiveRawPseudoHeaderPairs.forEach { (nameBytes, valueBytes, _) ->
+                appendLine("${renderBytesForDisplay(nameBytes)}: ${renderBytesForDisplay(valueBytes)}")
+            }
+            rawRegularHeaders.forEach { (nameBytes, valueBytes, _) ->
+                appendLine("${renderBytesForDisplay(nameBytes)}: ${renderBytesForDisplay(valueBytes)}")
+            }
+            if (!requestBodyBase64.isNullOrBlank()) {
+                val bodyBytes = decodeBase64ToBytes(requestBodyBase64)
+                appendLine()
+                append(renderBytesForDisplay(bodyBytes, maxLen = 2000))
+            } else if (requestBody.isNotBlank()) {
+                appendLine()
+                append(requestBody)
+            }
+        }
+
+        val allowed = runBlocking {
+            HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, http2RequestDisplay, api)
+        }
+        if (!allowed) {
+            api.logging().logToOutput("MCP RAW HTTP request denied: $targetHostname:$targetPort")
+            return@mcpTool "Send RAW HTTP request denied by Burp Suite"
+        }
+
+        api.logging().logToOutput("MCP RAW HTTP/2 request: $targetHostname:$targetPort")
+
+        val headerList = mutableListOf<HttpHeader>()
+
+        // Pseudo headers: include raw pseudo headers first (if any), then fill in remaining from strings.
+        effectiveRawPseudoHeaderPairs.forEach { (nameBytes, valueBytes, _) ->
+            headerList.add(HttpHeader.httpHeader(nameBytes, valueBytes))
+        }
+        fixedPseudoHeaders.forEach { (k, v) ->
+            if (!effectiveRawPseudoHeaderNamesLower.contains(k.lowercase())) {
+                headerList.add(HttpHeader.httpHeader(k.lowercase(), v))
+            }
+        }
+
+        // Raw regular headers.
+        rawRegularHeaders.forEach { (nameBytes, valueBytes, _) ->
+            headerList.add(HttpHeader.httpHeader(nameBytes, valueBytes))
+        }
+
+        val request = if (!requestBodyBase64.isNullOrBlank()) {
+            val bodyBytes = decodeBase64ToBytes(requestBodyBase64)
+            HttpRequest.http2Request(toMontoyaService(), headerList, ByteArray.byteArray(*bodyBytes))
+        } else {
+            HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
+        }
+
+        val response = api.http().sendRequest(request, HttpMode.HTTP_2)
         response?.toString() ?: "<no response>"
     }
 
@@ -307,6 +474,34 @@ data class SendHttp2Request(
     val pseudoHeaders: Map<String, String>,
     val headers: Map<String, String>,
     val requestBody: String,
+    override val targetHostname: String,
+    override val targetPort: Int,
+    override val usesHttps: Boolean
+) : HttpServiceParams
+
+@Serializable
+data class SendHttp1RequestRaw(
+    val contentBase64: String,
+    override val targetHostname: String,
+    override val targetPort: Int,
+    override val usesHttps: Boolean
+) : HttpServiceParams
+
+@Serializable
+data class RawHeaderBase64(
+    val nameBase64: String,
+    val valueBase64: String
+)
+
+@Serializable
+data class SendHttp2RequestRaw(
+    val pseudoHeaders: Map<String, String>,
+    // Optional raw pseudo headers (base64-encoded name/value bytes). Needed for request-tunnelling techniques
+    // that require non-UTF8/CTL bytes in pseudo-header values (e.g., CRLF injection into :path).
+    val rawPseudoHeaders: List<RawHeaderBase64> = emptyList(),
+    val rawHeaders: List<RawHeaderBase64> = emptyList(),
+    val requestBody: String = "",
+    val requestBodyBase64: String? = null,
     override val targetHostname: String,
     override val targetPort: Int,
     override val usesHttps: Boolean

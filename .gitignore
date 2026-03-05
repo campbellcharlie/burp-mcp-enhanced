@@ -40,3 +40,7 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+### Project ###
+SESSION_RESUME.md
+.kotlin/

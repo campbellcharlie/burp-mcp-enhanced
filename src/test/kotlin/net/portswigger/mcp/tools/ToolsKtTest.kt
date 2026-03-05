@@ -41,7 +41,7 @@ class ToolsKtTest {
     
     private val client = TestSseMcpClient()
     private val api = mockk<MontoyaApi>(relaxed = true)
-    private val serverManager = KtorServerManager(api)
+    private val serverManager = KtorServerManager(api, null, null)
     private val testPort = findAvailablePort()
     private var serverStarted = false
     private val config: McpConfig

@@ -61,6 +61,14 @@ class ServerConfigurationPanel(
         add(httpRequestApprovalCheckBox)
         add(createVerticalStrut(Design.Spacing.MD))
 
+        val rawSocketToolsCheckBox = createCheckBoxWithSubtitle(
+            "Enable raw socket tools",
+            "WARNING: Allows arbitrary TCP/TLS byte sends to allowlisted targets",
+            config.rawSocketToolsEnabled
+        ) { config.rawSocketToolsEnabled = it }
+        add(rawSocketToolsCheckBox)
+        add(createVerticalStrut(Design.Spacing.MD))
+
         val historyAccessApprovalCheckBox = createHistoryAccessApprovalCheckBox()
         add(historyAccessApprovalCheckBox)
         add(createVerticalStrut(Design.Spacing.SM))

@@ -43,11 +43,13 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     private val validationErrorLabel = WarningLabel()
     private val hostField = JTextField(15)
     private val portField = JTextField(5)
+    private val databasePathField = JTextField(20)
     private val reinstallNotice = WarningLabel("Make sure to reinstall after changing server settings")
 
     private lateinit var serverConfigurationPanel: ServerConfigurationPanel
     private lateinit var advancedOptionsPanel: AdvancedOptionsPanel
     private lateinit var autoApproveTargetsPanel: AutoApproveTargetsPanel
+    private lateinit var rawSocketTargetsPanel: RawSocketTargetsPanel
     private lateinit var installationPanel: InstallationPanel
 
     private var toggleListener: ((Boolean) -> Unit)? = null
@@ -57,6 +59,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         enabledToggle.setState(config.enabled, animate = false)
         hostField.text = config.host
         portField.text = config.port.toString()
+        databasePathField.text = config.databasePath
 
         initializeComponents()
         buildUi()
@@ -68,10 +71,12 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         )
 
         advancedOptionsPanel = AdvancedOptionsPanel(
-            hostField = hostField, portField = portField, reinstallNotice = reinstallNotice
+            hostField = hostField, portField = portField, databasePathField = databasePathField, reinstallNotice = reinstallNotice
         )
 
         autoApproveTargetsPanel = AutoApproveTargetsPanel(config = config)
+
+        rawSocketTargetsPanel = RawSocketTargetsPanel(config = config)
 
         installationPanel = InstallationPanel(
             config = config, providers = providers, reinstallNotice = reinstallNotice, parentComponent = panel
@@ -97,6 +102,9 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         if (::autoApproveTargetsPanel.isInitialized) {
             autoApproveTargetsPanel.cleanup()
         }
+        if (::rawSocketTargetsPanel.isInitialized) {
+            rawSocketTargetsPanel.cleanup()
+        }
     }
 
     fun onEnabledToggled(listener: (Boolean) -> Unit) {
@@ -106,6 +114,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     fun getConfig(): McpConfig {
         config.host = hostField.text
         portField.text.toIntOrNull()?.let { config.port = it }
+        config.databasePath = databasePathField.text.trim()
         return config
     }
 
@@ -198,6 +207,8 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
 
         rightPanelContent.add(autoApproveTargetsPanel)
+        rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
+        rightPanelContent.add(rawSocketTargetsPanel)
 
         rightPanelContent.add(createVerticalStrut(15))
         rightPanelContent.add(advancedOptionsPanel)

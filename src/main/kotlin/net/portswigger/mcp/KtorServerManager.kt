@@ -8,19 +8,29 @@ import io.ktor.server.netty.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
+import io.ktor.server.routing.get
+import io.ktor.server.routing.route
+import io.ktor.server.routing.routing
+import io.ktor.server.sse.SSE
 import io.modelcontextprotocol.kotlin.sdk.Implementation
 import io.modelcontextprotocol.kotlin.sdk.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import net.portswigger.mcp.config.McpConfig
-import net.portswigger.mcp.tools.registerTools
+import net.portswigger.mcp.database.DatabaseService
+import net.portswigger.mcp.logging.TrafficLogger
+import net.portswigger.mcp.tools.*
 import java.net.URI
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-class KtorServerManager(private val api: MontoyaApi) : ServerManager {
+class KtorServerManager(
+    private val api: MontoyaApi,
+    private val db: DatabaseService?,
+    private val trafficLogger: TrafficLogger?
+) : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -59,6 +69,9 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                     }
 
                     intercept(ApplicationCallPipeline.Call) {
+                        // Debug logging
+                        api.logging().logToOutput("MCP Request: ${call.request.httpMethod.value} ${call.request.uri} UA=${call.request.header("User-Agent")}")
+
                         val origin = call.request.header("Origin")
                         val host = call.request.header("Host")
                         val referer = call.request.header("Referer")
@@ -96,7 +109,31 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                         mcpServer
                     }
 
+                    // Redirect /sse/sse to root for clients that append /sse twice
+                    routing {
+                        get("/sse/sse") {
+                            call.respondRedirect("/", permanent = false)
+                        }
+                    }
+
                     mcpServer.registerTools(api, config)
+                    mcpServer.registerRawSocketTools(api, config)
+
+                    // Register enhanced tools if database/logger are available
+                    if (db != null && trafficLogger != null) {
+                        mcpServer.registerTrafficTools(db, trafficLogger, api, config)
+                        mcpServer.registerSessionTools(db)
+                    }
+                    mcpServer.registerRaceTools(api)
+                    mcpServer.registerJwtTools()
+                    mcpServer.registerDiffTools()
+                    mcpServer.registerGraphqlTools(api)
+                    mcpServer.registerCollaboratorTools(api)
+
+                    // Register new Phase 1 tools
+                    mcpServer.registerScopeTools(api)
+                    mcpServer.registerSiteMapTools(api)
+                    mcpServer.registerScannerTools(api)  // Professional only - checks edition internally
                 }.apply {
                     start(wait = false)
                 }

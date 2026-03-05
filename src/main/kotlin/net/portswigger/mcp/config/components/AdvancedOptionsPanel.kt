@@ -2,6 +2,7 @@ package net.portswigger.mcp.config.components
 
 import net.portswigger.mcp.config.Design
 import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -13,6 +14,7 @@ import javax.swing.event.DocumentListener
 class AdvancedOptionsPanel(
     private val hostField: JTextField,
     private val portField: JTextField,
+    private val databasePathField: JTextField,
     private val reinstallNotice: WarningLabel
 ) : JPanel() {
 
@@ -42,10 +44,41 @@ class AdvancedOptionsPanel(
         add(Design.createSectionLabel("Advanced Options"))
         add(createVerticalStrut(Design.Spacing.MD))
 
+        val browsePanel = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+            isOpaque = false
+            add(databasePathField)
+            add(Box.createHorizontalStrut(Design.Spacing.SM))
+            add(Design.createOutlinedButton("Browse...").apply {
+                addActionListener {
+                    val chooser = JFileChooser().apply {
+                        fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+                        dialogTitle = "Select Database Directory"
+                        val currentPath = databasePathField.text.trim()
+                        if (currentPath.isNotEmpty()) {
+                            currentDirectory = java.io.File(currentPath)
+                        }
+                    }
+                    if (chooser.showOpenDialog(this@AdvancedOptionsPanel) == JFileChooser.APPROVE_OPTION) {
+                        databasePathField.text = chooser.selectedFile.absolutePath
+                    }
+                }
+            })
+        }
+
         val formPanel = createFormPanel(
-            "Server host:" to hostField, "Server port:" to portField
+            "Server host:" to hostField,
+            "Server port:" to portField,
+            "Database directory:" to browsePanel
         )
+
         add(formPanel)
+
+        val hintLabel = JLabel("Leave blank for default (~/.burp-mcp/). File is named per Burp project.").apply {
+            font = Design.Typography.bodyMedium
+            foreground = Design.Colors.onSurfaceVariant
+            alignmentX = LEFT_ALIGNMENT
+        }
+        add(hintLabel)
     }
 
     private fun setupFieldTracking() {
