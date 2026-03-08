@@ -79,7 +79,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
 
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
-        val response = api.http().sendRequest(request)
+        val response = api.http().sendRequest(request, HttpMode.HTTP_1)
 
         response?.toString() ?: "<no response>"
     }
@@ -108,12 +108,13 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         api.logging().logToOutput("MCP RAW HTTP/1.1 request: $targetHostname:$targetPort")
 
         val request = HttpRequest.httpRequest(toMontoyaService(), ByteArray.byteArray(*requestBytes))
-        val response = api.http().sendRequest(request)
+        val response = api.http().sendRequest(request, HttpMode.HTTP_1)
 
         response?.toString() ?: "<no response>"
     }
 
-    mcpTool<SendHttp2Request>("Issues an HTTP/2 request and returns the response. Do NOT pass headers to the body parameter.") {
+    mcpTool<SendHttp2Request>("Issues an HTTP/2 request and returns the response. Do NOT pass headers to the body parameter. " +
+        "Set ignoreAlpn=true to force HTTP/2 even when ALPN does not advertise h2 support.") {
         val http2RequestDisplay = buildString {
             pseudoHeaders.forEach { (key, value) ->
                 val headerName = if (key.startsWith(":")) key else ":$key"
@@ -159,14 +160,16 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         val headerList = (fixedPseudoHeaders + headers).map { HttpHeader.httpHeader(it.key.lowercase(), it.value) }
 
         val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
-        val response = api.http().sendRequest(request, HttpMode.HTTP_2)
+        val h2Mode = if (ignoreAlpn == true) HttpMode.HTTP_2_IGNORE_ALPN else HttpMode.HTTP_2
+        val response = api.http().sendRequest(request, h2Mode)
 
         response?.toString() ?: "<no response>"
     }
 
     mcpTool<SendHttp2RequestRaw>(
         "Issues an HTTP/2 request that supports raw (base64) header name/value bytes. " +
-            "Useful for advanced HTTP/2 desync/request-tunnelling research where header bytes must be non-standard."
+            "Useful for advanced HTTP/2 desync/request-tunnelling research where header bytes must be non-standard. " +
+            "Set ignoreAlpn=true to force HTTP/2 even when ALPN does not advertise h2 support."
     ) {
         if (!usesHttps) {
             return@mcpTool "Error: HTTP/2 tool requires TLS (usesHttps=true) in this implementation."
@@ -276,8 +279,173 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
         }
 
-        val response = api.http().sendRequest(request, HttpMode.HTTP_2)
+        val h2RawMode = if (ignoreAlpn == true) HttpMode.HTTP_2_IGNORE_ALPN else HttpMode.HTTP_2
+        val response = api.http().sendRequest(request, h2RawMode)
         response?.toString() ?: "<no response>"
+    }
+
+    mcpTool<SendHttpRequest>(
+        "Send a structured HTTP request. Auto-constructs the raw request from " +
+        "method/path/headers/body. Auto-calculates Content-Length and Host header. " +
+        "Set injectSession=true to auto-add cookies from the active session. " +
+        "Set extractRegex to return only matched content instead of full response. " +
+        "Set bodyOnly=true to strip response headers. " +
+        "Set captureSession to auto-create a session from Set-Cookie response headers. " +
+        "Set httpVersion=\"2\" for HTTP/2, \"2-ignore-alpn\" to force HTTP/2 even without ALPN h2 support, " +
+        "or \"auto\" for automatic protocol negotiation. " +
+        "Set followRedirects=true to follow 3xx redirects (up to 10 hops)."
+    ) {
+        val useHttp2 = httpVersion == "2" || httpVersion == "2-ignore-alpn" || httpVersion == "auto"
+
+        // Build the initial request
+        val rawRequest = buildHttpRequest(
+            method, path, headers ?: emptyMap(), body,
+            targetHostname, targetPort, usesHttps, injectSession ?: false
+        )
+
+        val allowed = runBlocking {
+            HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, rawRequest, api)
+        }
+        if (!allowed) {
+            api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
+            return@mcpTool "Send HTTP request denied by Burp Suite"
+        }
+
+        val httpMode = when (httpVersion) {
+            "2" -> HttpMode.HTTP_2
+            "2-ignore-alpn" -> HttpMode.HTTP_2_IGNORE_ALPN
+            "auto" -> HttpMode.AUTO
+            else -> HttpMode.HTTP_1
+        }
+        api.logging().logToOutput("MCP structured HTTP/${httpVersion ?: "1.1"} request: $targetHostname:$targetPort")
+
+        val service = toMontoyaService()
+
+        // Send the request (HTTP/1.1 or HTTP/2)
+        val initialRequest = if (useHttp2) {
+            // Build HTTP/2 pseudo-headers from method/path
+            val isStandardPort = (usesHttps && targetPort == 443) || (!usesHttps && targetPort == 80)
+            val authority = if (isStandardPort) targetHostname else "$targetHostname:$targetPort"
+            val scheme = if (usesHttps) "https" else "http"
+
+            val h2Headers = mutableListOf<HttpHeader>()
+            h2Headers.add(HttpHeader.httpHeader(":scheme", scheme))
+            h2Headers.add(HttpHeader.httpHeader(":method", method))
+            h2Headers.add(HttpHeader.httpHeader(":path", path))
+            h2Headers.add(HttpHeader.httpHeader(":authority", authority))
+
+            // Session injection
+            if (injectSession == true) {
+                val session = SessionManager.getCurrentSession()
+                if (session != null) {
+                    if (session.cookies.isNotEmpty()) {
+                        val cookieHeader = session.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                        h2Headers.add(HttpHeader.httpHeader("cookie", cookieHeader))
+                    }
+                    session.headers.forEach { (k, v) ->
+                        h2Headers.add(HttpHeader.httpHeader(k.lowercase(), v))
+                    }
+                }
+            }
+
+            // User-provided headers
+            (headers ?: emptyMap()).forEach { (k, v) ->
+                h2Headers.add(HttpHeader.httpHeader(k.lowercase(), v))
+            }
+
+            HttpRequest.http2Request(service, h2Headers, body ?: "")
+        } else {
+            HttpRequest.httpRequest(service, rawRequest)
+        }
+
+        var response = api.http().sendRequest(initialRequest, httpMode)
+        var statusCode = response?.response()?.statusCode()?.toInt() ?: 0
+        var rawResponse = response?.response()?.toString() ?: "<no response>"
+
+        // Follow redirects if enabled
+        val redirectChain = mutableListOf<Int>()
+        if (followRedirects == true) {
+            var hops = 0
+            while (statusCode in 300..399 && hops < 10) {
+                redirectChain.add(statusCode)
+                val locationHeader = response?.response()?.headers()
+                    ?.firstOrNull { it.name().equals("Location", ignoreCase = true) }
+                    ?.value() ?: break
+
+                // Resolve location (could be relative or absolute)
+                val redirectPath = if (locationHeader.startsWith("http://") || locationHeader.startsWith("https://")) {
+                    try {
+                        java.net.URI(locationHeader).rawPath ?: locationHeader
+                    } catch (_: Exception) { locationHeader }
+                } else {
+                    locationHeader
+                }
+
+                val redirectRequest = if (useHttp2) {
+                    val isStdPort = (usesHttps && targetPort == 443) || (!usesHttps && targetPort == 80)
+                    val auth = if (isStdPort) targetHostname else "$targetHostname:$targetPort"
+                    val h2Headers = mutableListOf<HttpHeader>()
+                    h2Headers.add(HttpHeader.httpHeader(":scheme", if (usesHttps) "https" else "http"))
+                    h2Headers.add(HttpHeader.httpHeader(":method", "GET"))
+                    h2Headers.add(HttpHeader.httpHeader(":path", redirectPath))
+                    h2Headers.add(HttpHeader.httpHeader(":authority", auth))
+
+                    if (injectSession == true) {
+                        val session = SessionManager.getCurrentSession()
+                        if (session != null && session.cookies.isNotEmpty()) {
+                            val cookieHeader = session.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                            h2Headers.add(HttpHeader.httpHeader("cookie", cookieHeader))
+                        }
+                    }
+                    HttpRequest.http2Request(service, h2Headers, "")
+                } else {
+                    val redirectRaw = buildHttpRequest(
+                        "GET", redirectPath, emptyMap(), null,
+                        targetHostname, targetPort, usesHttps, injectSession ?: false
+                    )
+                    HttpRequest.httpRequest(service, redirectRaw)
+                }
+
+                response = api.http().sendRequest(redirectRequest, httpMode)
+                statusCode = response?.response()?.statusCode()?.toInt() ?: 0
+                rawResponse = response?.response()?.toString() ?: "<no response>"
+                hops++
+            }
+        }
+
+        // Capture session from Set-Cookie if requested
+        if (!captureSession.isNullOrBlank() && response?.response() != null) {
+            val setCookieHeaders = response.response().headers()
+                .filter { it.name().equals("Set-Cookie", ignoreCase = true) }
+            if (setCookieHeaders.isNotEmpty()) {
+                val parsedCookies = mutableMapOf<String, String>()
+                setCookieHeaders.forEach { header ->
+                    val cookiePart = header.value().split(";").first().trim()
+                    val parts = cookiePart.split("=", limit = 2)
+                    if (parts.size == 2) {
+                        parsedCookies[parts[0].trim()] = parts[1].trim()
+                    }
+                }
+                if (parsedCookies.isNotEmpty()) {
+                    val session = ActiveSession(
+                        name = captureSession,
+                        cookies = parsedCookies
+                    )
+                    SessionManager.setSession(captureSession, session)
+                    SessionManager.currentSession = captureSession
+                }
+            }
+        }
+
+        val filtered = filterResponse(rawResponse, extractRegex, extractGroup, bodyOnly, statusCode)
+
+        // Add redirect chain info if applicable
+        if (redirectChain.isNotEmpty()) {
+            val chain = (redirectChain + statusCode).joinToString("\u2192")
+            "[$statusCode] (redirected: $chain) ${filtered.removePrefix("[$statusCode] ")}"
+        } else {
+            filtered
+        }
     }
 
     mcpTool<CreateRepeaterTab>("Creates a new Repeater tab with the specified HTTP request and optional tab name. Make sure to use carriage returns appropriately.") {
@@ -476,7 +644,8 @@ data class SendHttp2Request(
     val requestBody: String,
     override val targetHostname: String,
     override val targetPort: Int,
-    override val usesHttps: Boolean
+    override val usesHttps: Boolean,
+    val ignoreAlpn: Boolean? = null
 ) : HttpServiceParams
 
 @Serializable
@@ -504,7 +673,8 @@ data class SendHttp2RequestRaw(
     val requestBodyBase64: String? = null,
     override val targetHostname: String,
     override val targetPort: Int,
-    override val usesHttps: Boolean
+    override val usesHttps: Boolean,
+    val ignoreAlpn: Boolean? = null
 ) : HttpServiceParams
 
 @Serializable
@@ -570,3 +740,21 @@ data class GetProxyWebsocketHistory(override val count: Int, override val offset
 @Serializable
 data class GetProxyWebsocketHistoryRegex(val regex: String, override val count: Int, override val offset: Int) :
     Paginated
+
+@Serializable
+data class SendHttpRequest(
+    val method: String,
+    val path: String,
+    val headers: Map<String, String>? = null,
+    val body: String? = null,
+    override val targetHostname: String,
+    override val targetPort: Int,
+    override val usesHttps: Boolean,
+    val injectSession: Boolean? = null,
+    val extractRegex: String? = null,
+    val extractGroup: Int? = null,
+    val bodyOnly: Boolean? = null,
+    val captureSession: String? = null,
+    val httpVersion: String? = null,
+    val followRedirects: Boolean? = null
+) : HttpServiceParams

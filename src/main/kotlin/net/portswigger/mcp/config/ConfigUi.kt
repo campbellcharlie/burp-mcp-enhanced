@@ -20,8 +20,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     private val panel = JPanel(BorderLayout())
     val component: JComponent get() = panel
 
-    private val listenerHandles = mutableListOf<ListenerHandle>()
-
     private val enabledToggle: ToggleSwitch = Design.createToggleSwitch(false) { enabled ->
         if (suppressToggleEvents) return@createToggleSwitch
 
@@ -48,9 +46,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
     private lateinit var serverConfigurationPanel: ServerConfigurationPanel
     private lateinit var advancedOptionsPanel: AdvancedOptionsPanel
-    private lateinit var autoApproveTargetsPanel: AutoApproveTargetsPanel
-    private lateinit var rawSocketTargetsPanel: RawSocketTargetsPanel
-    private lateinit var installationPanel: InstallationPanel
 
     private var toggleListener: ((Boolean) -> Unit)? = null
     private var suppressToggleEvents: Boolean = false
@@ -71,40 +66,13 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         )
 
         advancedOptionsPanel = AdvancedOptionsPanel(
+            config = config,
             hostField = hostField, portField = portField, databasePathField = databasePathField, reinstallNotice = reinstallNotice
         )
-
-        autoApproveTargetsPanel = AutoApproveTargetsPanel(config = config)
-
-        rawSocketTargetsPanel = RawSocketTargetsPanel(config = config)
-
-        installationPanel = InstallationPanel(
-            config = config, providers = providers, reinstallNotice = reinstallNotice, parentComponent = panel
-        )
-
-        setupConfigListeners()
-    }
-
-    private fun setupConfigListeners() {
-        val historyAccessRefreshListener = {
-            SwingUtilities.invokeLater {
-                serverConfigurationPanel.updateHistoryAccessCheckboxes()
-            }
-        }
-        val handle = config.addHistoryAccessChangeListener(historyAccessRefreshListener)
-        listenerHandles.add(handle)
     }
 
     fun cleanup() {
-        listenerHandles.forEach { it.remove() }
-        listenerHandles.clear()
-
-        if (::autoApproveTargetsPanel.isInitialized) {
-            autoApproveTargetsPanel.cleanup()
-        }
-        if (::rawSocketTargetsPanel.isInitialized) {
-            rawSocketTargetsPanel.cleanup()
-        }
+        // No listener handles to clean up after simplification
     }
 
     fun onEnabledToggled(listener: (Boolean) -> Unit) {
@@ -205,18 +173,9 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
         rightPanelContent.add(serverConfigurationPanel)
         rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
-
-        rightPanelContent.add(autoApproveTargetsPanel)
-        rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
-        rightPanelContent.add(rawSocketTargetsPanel)
-
-        rightPanelContent.add(createVerticalStrut(15))
         rightPanelContent.add(advancedOptionsPanel)
         rightPanelContent.add(createVerticalGlue())
         rightPanelContent.add(reinstallNotice)
-        rightPanelContent.add(createVerticalStrut(10))
-
-        rightPanelContent.add(installationPanel)
 
         val columnsPanel = ResponsiveColumnsPanel(leftPanel, rightPanel)
         panel.add(columnsPanel, BorderLayout.CENTER)

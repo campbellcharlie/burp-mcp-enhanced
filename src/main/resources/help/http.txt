@@ -1,0 +1,103 @@
+=== HTTP Request Tools ===
+
+All HTTP tools send requests through Burp Suite. Line endings are auto-normalized to CRLF.
+
+--- send_http1_request ---
+
+  Parameters:
+    content: String         Raw HTTP request text
+    targetHostname: String  Target hostname
+    targetPort: Int         Target port number
+    usesHttps: Boolean      Whether to use HTTPS
+
+  Example:
+    send_http1_request(
+      content="GET /api/users HTTP/1.1\nHost: target.com\nAuthorization: Bearer TOKEN\n\n",
+      targetHostname="target.com",
+      targetPort=443,
+      usesHttps=true
+    )
+
+  POST example:
+    send_http1_request(
+      content="POST /api/login HTTP/1.1\nHost: target.com\nContent-Type: application/json\nContent-Length: 42\n\n{\"username\":\"admin\",\"password\":\"test\"}",
+      targetHostname="target.com",
+      targetPort=443,
+      usesHttps=true
+    )
+
+--- send_http1_request_raw ---
+
+  Parameters:
+    contentBase64: String   Base64-encoded raw HTTP request bytes
+    targetHostname: String
+    targetPort: Int
+    usesHttps: Boolean
+
+  Use for byte-level control: null bytes, malformed headers, non-standard line endings.
+  Essential for request smuggling where exact byte sequences matter.
+
+--- send_http2_request ---
+
+  Parameters:
+    pseudoHeaders: Map<String, String>  HTTP/2 pseudo-headers (:method, :path, :scheme, :authority)
+    headers: Map<String, String>        Regular HTTP headers
+    requestBody: String                 Request body
+    targetHostname: String
+    targetPort: Int
+    usesHttps: Boolean
+
+  Pseudo-headers are auto-ordered per spec: :scheme, :method, :path, :authority
+  Prefix ":" on pseudo-header names is optional -- added automatically.
+
+  Example:
+    send_http2_request(
+      pseudoHeaders={"method": "GET", "path": "/api/users", "scheme": "https", "authority": "target.com"},
+      headers={"authorization": "Bearer TOKEN"},
+      requestBody="",
+      targetHostname="target.com",
+      targetPort=443,
+      usesHttps=true
+    )
+
+--- send_http2_request_raw ---
+
+  Parameters:
+    pseudoHeaders: Map<String, String>        String pseudo-headers
+    rawPseudoHeaders: List<RawHeaderBase64>   Raw pseudo-headers [{nameBase64, valueBase64}]
+    rawHeaders: List<RawHeaderBase64>         Raw regular headers [{nameBase64, valueBase64}]
+    requestBody: String                       Body as string
+    requestBodyBase64: String?                Body as base64 (overrides requestBody)
+    targetHostname: String
+    targetPort: Int
+    usesHttps: Boolean
+
+  Use for HTTP/2 desync, request tunnelling, or CRLF injection in pseudo-header values.
+  Raw headers bypass normalization -- exact bytes are sent.
+
+--- create_repeater_tab ---
+
+  Parameters: tabName?, content, targetHostname, targetPort, usesHttps
+  Creates a tab in Burp Repeater for manual follow-up.
+
+--- send_to_intruder ---
+
+  Parameters: tabName?, content, targetHostname, targetPort, usesHttps
+  Sends request to Burp Intruder for automated testing.
+
+WORKFLOW PATTERNS
+
+  Basic request flow:
+    send_http1_request -> analyze_response -> compare_responses
+
+  Multi-session testing:
+    session_switch(name="admin") -> send_http1_request -> capture response
+    session_switch(name="low_priv") -> send same request -> compare_responses
+
+  Replay and modify:
+    search_traffic(query="login") -> get_traffic_by_id(id=ID)
+    -> replay_from_db(trafficId=ID, modifiedBody="username=admin")
+
+  HTTP/2 testing:
+    send_http2_request for standard H2 requests
+    send_http2_request_raw for desync/smuggling attacks

@@ -1,17 +1,20 @@
 package net.portswigger.mcp.config.components
 
 import net.portswigger.mcp.config.Design
+import net.portswigger.mcp.config.McpConfig
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.awt.event.ItemEvent
 import javax.swing.*
 import javax.swing.Box.createVerticalStrut
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 
 class AdvancedOptionsPanel(
+    private val config: McpConfig,
     private val hostField: JTextField,
     private val portField: JTextField,
     private val databasePathField: JTextField,
@@ -42,6 +45,18 @@ class AdvancedOptionsPanel(
 
     private fun buildPanel() {
         add(Design.createSectionLabel("Advanced Options"))
+        add(createVerticalStrut(Design.Spacing.MD))
+
+        val trafficLoggingCheckBox = JCheckBox("Enable traffic logging to SQLite").apply {
+            alignmentX = LEFT_ALIGNMENT
+            isSelected = config.trafficLoggingEnabled
+            font = Design.Typography.bodyLarge
+            foreground = Design.Colors.onSurface
+            addItemListener { event ->
+                config.trafficLoggingEnabled = (event.stateChange == ItemEvent.SELECTED)
+            }
+        }
+        add(trafficLoggingCheckBox)
         add(createVerticalStrut(Design.Spacing.MD))
 
         val browsePanel = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {

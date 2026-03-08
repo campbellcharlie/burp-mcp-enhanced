@@ -9,8 +9,11 @@ import net.portswigger.mcp.logging.TrafficLogger
 import net.portswigger.mcp.providers.ClaudeDesktopProvider
 import net.portswigger.mcp.providers.ManualProxyInstallerProvider
 import net.portswigger.mcp.providers.ProxyJarManager
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import javax.swing.JFileChooser
+import javax.swing.SwingUtilities
 
 @Suppress("unused")
 class ExtensionBase : BurpExtension {
@@ -21,13 +24,15 @@ class ExtensionBase : BurpExtension {
     override fun initialize(api: MontoyaApi) {
         api.extension().setName("Burp MCP Server (Enhanced)")
 
-        val config = McpConfig(api.persistence().extensionData(), api.logging())
+        val config = McpConfig(api.persistence().preferences(), api.logging())
 
         // Initialize database if traffic logging is enabled
         if (config.trafficLoggingEnabled) {
             try {
                 val dbPath = resolveDbPath(config, api)
-                databaseService = DatabaseService(dbPath, api.logging())
+                val usablePath = findUsableDbPath(dbPath, api)
+
+                databaseService = DatabaseService(usablePath, api.logging())
 
                 trafficLogger = TrafficLogger(api, databaseService!!, api.logging()).apply {
                     enabled = config.trafficLoggingEnabled
@@ -39,7 +44,7 @@ class ExtensionBase : BurpExtension {
                     register()
                 }
 
-                api.logging().logToOutput("Traffic logging enabled: $dbPath")
+                api.logging().logToOutput("Database initialized at ${usablePath.toAbsolutePath()}")
             } catch (e: Exception) {
                 api.logging().logToError("Failed to initialize database: ${e.message}")
                 // Continue without database - core MCP functionality still works
@@ -92,17 +97,115 @@ class ExtensionBase : BurpExtension {
     }
 
     private fun resolveDbPath(config: McpConfig, api: MontoyaApi): Path {
-        val dbDir = if (config.databasePath.isNotBlank()) {
-            Paths.get(config.databasePath)
-        } else {
-            val home = System.getProperty("user.home")
-            Paths.get(home, ".burp-mcp")
-        }
-        dbDir.toFile().mkdirs()
+        val preferences = api.persistence().preferences()
+        val projectName = sanitizeForFileSystem(detectProjectName(api))
+        val dbFilename = "$projectName.db"
 
-        val projectName = detectProjectName(api)
-        val fileName = "traffic_$projectName.db"
-        return dbDir.resolve(fileName)
+        // 1. Check config UI path first
+        if (config.databasePath.isNotBlank()) {
+            val dir = Paths.get(config.databasePath)
+            if (Files.isDirectory(dir)) {
+                // Save to preferences for next session
+                preferences.setString(PREF_DB_DIRECTORY, dir.toString())
+                return dir.resolve(dbFilename)
+            }
+        }
+
+        // 2. Check saved preference
+        val savedDir = preferences.getString(PREF_DB_DIRECTORY)
+        if (!savedDir.isNullOrEmpty()) {
+            val dir = Paths.get(savedDir)
+            if (Files.isDirectory(dir)) {
+                return dir.resolve(dbFilename)
+            }
+        }
+
+        // 3. Prompt for directory
+        val chosenDir = promptForDirectory(api)
+        if (chosenDir != null) {
+            preferences.setString(PREF_DB_DIRECTORY, chosenDir.toString())
+            config.databasePath = chosenDir.toString()
+            return chosenDir.resolve(dbFilename)
+        }
+
+        // 4. Fallback
+        val fallbackDir = Paths.get(System.getProperty("user.home"), FALLBACK_DIR)
+        Files.createDirectories(fallbackDir)
+        api.logging().logToOutput("No directory selected, using fallback: $fallbackDir")
+        return fallbackDir.resolve(dbFilename)
+    }
+
+    private fun promptForDirectory(api: MontoyaApi): Path? {
+        var result: Path? = null
+        try {
+            SwingUtilities.invokeAndWait {
+                val chooser = JFileChooser()
+                chooser.dialogTitle = "Select directory for SQLite traffic database"
+                chooser.fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+                chooser.currentDirectory = java.io.File(System.getProperty("user.home"))
+
+                val choice = chooser.showOpenDialog(null)
+                if (choice == JFileChooser.APPROVE_OPTION) {
+                    result = chooser.selectedFile.toPath()
+                }
+            }
+        } catch (e: Exception) {
+            api.logging().logToError("Directory chooser failed: ${e.message}")
+        }
+        return result
+    }
+
+    /**
+     * Try the primary DB path. If it exists and is locked or unwritable,
+     * append a version suffix (.v2, .v3, ...) until we find a usable path.
+     */
+    private fun findUsableDbPath(primaryPath: Path, api: MontoyaApi): Path {
+        // If file doesn't exist yet, parent dir must be writable
+        if (!Files.exists(primaryPath)) {
+            val parent = primaryPath.parent
+            if (parent != null) Files.createDirectories(parent)
+            return primaryPath
+        }
+
+        // File exists — try to open it
+        if (isDbUsable(primaryPath)) {
+            return primaryPath
+        }
+
+        // Locked or unwritable — try versioned alternatives
+        val name = primaryPath.fileName.toString()
+        val base = name.removeSuffix(".db")
+        val dir = primaryPath.parent
+
+        for (version in 2..MAX_DB_VERSIONS) {
+            val candidate = dir.resolve("${base}.v${version}.db")
+            if (!Files.exists(candidate) || isDbUsable(candidate)) {
+                api.logging().logToOutput(
+                    "Primary database $primaryPath is locked/unwritable, using ${candidate.toAbsolutePath()}"
+                )
+                return candidate
+            }
+        }
+
+        // All versions exhausted — last resort with timestamp
+        val fallback = dir.resolve("${base}.${System.currentTimeMillis()}.db")
+        api.logging().logToOutput("All versioned DB paths exhausted, using ${fallback.toAbsolutePath()}")
+        return fallback
+    }
+
+    private fun isDbUsable(path: Path): Boolean {
+        return try {
+            val conn = java.sql.DriverManager.getConnection("jdbc:sqlite:$path")
+            conn.use { c ->
+                c.createStatement().use { stmt ->
+                    stmt.execute("PRAGMA journal_mode = WAL")
+                    stmt.executeQuery("PRAGMA quick_check(1)").close()
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun detectProjectName(api: MontoyaApi): String {
@@ -111,7 +214,7 @@ class ExtensionBase : BurpExtension {
             if (name.isNullOrBlank()) {
                 "Temporary_project"
             } else {
-                sanitizeForFileSystem(name)
+                name
             }
         } catch (e: Exception) {
             "unknown_project_${System.currentTimeMillis()}"
@@ -120,14 +223,19 @@ class ExtensionBase : BurpExtension {
 
     private fun sanitizeForFileSystem(name: String): String {
         var sanitized = name
-            .replace(Regex("[^a-zA-Z0-9\\-_ ]"), "_")
-            .replace(Regex("\\s+"), "_")
+            .replace(Regex("[^a-zA-Z0-9._\\-]"), "_")
             .replace(Regex("_{2,}"), "_")
             .trimStart('_').trimEnd('_')
 
-        if (sanitized.isEmpty()) sanitized = "unnamed_project"
+        if (sanitized.isEmpty()) sanitized = "burp_project"
         if (sanitized.length > 100) sanitized = sanitized.substring(0, 100)
 
         return sanitized
+    }
+
+    companion object {
+        private const val PREF_DB_DIRECTORY = "db_directory"
+        private const val FALLBACK_DIR = ".burp-sqlite-logs"
+        private const val MAX_DB_VERSIONS = 10
     }
 }

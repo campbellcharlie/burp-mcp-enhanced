@@ -7,7 +7,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.database.DatabaseService
+import net.portswigger.mcp.database.RawSocketItem
 import net.portswigger.mcp.security.HttpRequestSecurity
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -23,10 +28,10 @@ import javax.net.ssl.X509TrustManager
 
 private val json = Json { prettyPrint = true }
 
-private fun b64decode(s: String): ByteArray = Base64.getDecoder().decode(s.trim())
-private fun b64encode(b: ByteArray): String = Base64.getEncoder().encodeToString(b)
+internal fun b64decode(s: String): ByteArray = Base64.getDecoder().decode(s.trim())
+internal fun b64encode(b: ByteArray): String = Base64.getEncoder().encodeToString(b)
 
-private fun renderBytesPreview(bytes: ByteArray, maxLen: Int): String {
+internal fun renderBytesPreview(bytes: ByteArray, maxLen: Int): String {
     val shown = bytes.take(maxLen)
     val sb = StringBuilder()
     for (b in shown) {
@@ -43,7 +48,7 @@ private fun renderBytesPreview(bytes: ByteArray, maxLen: Int): String {
     return sb.toString()
 }
 
-private fun isValidWildcardMatch(hostname: String, domain: String): Boolean {
+internal fun isValidWildcardMatch(hostname: String, domain: String): Boolean {
     if (domain.isEmpty() || domain.contains("*")) return false
     if (hostname.length <= domain.length) return false
     val expectedSuffix = ".$domain"
@@ -59,7 +64,7 @@ private fun isValidWildcardMatch(hostname: String, domain: String): Boolean {
     }
 }
 
-private fun isTargetAllowed(hostname: String, port: Int, config: McpConfig): Boolean {
+internal fun isTargetAllowed(hostname: String, port: Int, config: McpConfig): Boolean {
     val target = "$hostname:$port"
     val hostOnly = hostname
     val targets = config.getRawSocketAllowedTargetsList()
@@ -81,7 +86,7 @@ private data class SocketResult(
     val responsePreview: String
 )
 
-private fun readAllAvailable(
+internal fun readAllAvailable(
     socket: Socket,
     maxReadBytes: Int,
     readTimeoutMs: Int
@@ -121,7 +126,7 @@ private fun sendSegments(
     os.flush()
 }
 
-private fun buildInsecureSslContext(): SSLContext {
+internal fun buildInsecureSslContext(): SSLContext {
     val trustAll = arrayOf<TrustManager>(
         object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
@@ -132,7 +137,9 @@ private fun buildInsecureSslContext(): SSLContext {
     return SSLContext.getInstance("TLS").apply { init(null, trustAll, java.security.SecureRandom()) }
 }
 
-fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
+internal fun now(): String = Instant.now().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
+
+fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig, db: DatabaseService? = null) {
 
     mcpTool<SendRawTcp>(
         "Send raw TCP bytes (base64) to a host/port with optional segmented writes and delays. " +
@@ -171,14 +178,34 @@ fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
 
         val sock = Socket()
         try {
+            val startNs = System.nanoTime()
             sock.connect(InetSocketAddress(targetHost, targetPort), connectTimeoutMs)
             sendSegments(sock, segments, flushEach)
+            val reqBytes = segments.flatMap { b64decode(it.bytesBase64).toList() }.toByteArray()
             val resp = readAllAvailable(sock, maxReadBytes, readTimeoutMs)
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
             val r = SocketResult(
                 bytesRead = resp.size,
                 responseBase64 = b64encode(resp),
                 responsePreview = renderBytesPreview(resp, responsePreviewBytes)
             )
+
+            db?.let {
+                try {
+                    it.insertRawSocketTraffic(RawSocketItem(
+                        timestamp = now(), tool = "raw-socket-tcp",
+                        targetHost = targetHost, targetPort = targetPort, protocol = "TCP",
+                        requestBytes = reqBytes, responseBytes = resp,
+                        requestPreview = renderBytesPreview(reqBytes, 2000),
+                        responsePreview = r.responsePreview,
+                        bytesSent = reqBytes.size, bytesReceived = resp.size,
+                        elapsedMs = elapsedMs, segmentCount = segments.size
+                    ))
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log raw TCP traffic: ${e.message}")
+                }
+            }
+
             json.encodeToString(SocketResultResponse(
                 applicationProtocol = r.applicationProtocol,
                 bytesRead = r.bytesRead,
@@ -230,8 +257,10 @@ fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
 
         val ctx = if (insecureSkipVerify) buildInsecureSslContext() else SSLContext.getDefault()
         val factory = ctx.socketFactory
-        val raw = factory.createSocket() as SSLSocket
+        val raw = (factory.createSocket() as? SSLSocket)
+            ?: return@mcpTool "Error: failed to create SSL socket"
         try {
+            val startNs = System.nanoTime()
             raw.connect(InetSocketAddress(targetHost, targetPort), connectTimeoutMs)
             raw.sslParameters = raw.sslParameters.apply {
                 if (alpnProtocols.isNotEmpty()) {
@@ -241,14 +270,34 @@ fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
             raw.startHandshake()
 
             sendSegments(raw, segments, flushEach)
+            val reqBytes = segments.flatMap { b64decode(it.bytesBase64).toList() }.toByteArray()
             val resp = readAllAvailable(raw, maxReadBytes, readTimeoutMs)
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
 
+            val negotiatedAlpn = try { raw.applicationProtocol } catch (_: Exception) { null }
             val r = SocketResult(
-                applicationProtocol = try { raw.applicationProtocol } catch (_: Exception) { null },
+                applicationProtocol = negotiatedAlpn,
                 bytesRead = resp.size,
                 responseBase64 = b64encode(resp),
                 responsePreview = renderBytesPreview(resp, responsePreviewBytes)
             )
+
+            db?.let {
+                try {
+                    it.insertRawSocketTraffic(RawSocketItem(
+                        timestamp = now(), tool = "raw-socket-tls",
+                        targetHost = targetHost, targetPort = targetPort, protocol = "TLS",
+                        tlsAlpn = negotiatedAlpn ?: alpnProtocols.joinToString(",").ifEmpty { null },
+                        requestBytes = reqBytes, responseBytes = resp,
+                        requestPreview = renderBytesPreview(reqBytes, 2000),
+                        responsePreview = r.responsePreview,
+                        bytesSent = reqBytes.size, bytesReceived = resp.size,
+                        elapsedMs = elapsedMs, segmentCount = segments.size
+                    ))
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log raw TLS traffic: ${e.message}")
+                }
+            }
 
             json.encodeToString(SocketResultResponse(
                 applicationProtocol = r.applicationProtocol,
@@ -304,7 +353,8 @@ fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
             // Connect + send prefix.
             repeat(count) {
                 val s: Socket = if (useTls) {
-                    val ssl = (ctx!!.socketFactory.createSocket() as SSLSocket)
+                    val ssl = (ctx!!.socketFactory.createSocket() as? SSLSocket)
+                        ?: throw RuntimeException("Failed to create SSL socket")
                     ssl.connect(InetSocketAddress(targetHost, targetPort), connectTimeoutMs)
                     ssl.sslParameters = ssl.sslParameters.apply {
                         if (alpnProtocols.isNotEmpty()) applicationProtocols = alpnProtocols.toTypedArray()
@@ -354,6 +404,28 @@ fun Server.registerRawSocketTools(api: MontoyaApi, config: McpConfig) {
             pool.awaitTermination((readTimeoutMs + 1000).toLong(), TimeUnit.MILLISECONDS)
 
             val out = results.map { it.get((readTimeoutMs + 3000).toLong(), TimeUnit.MILLISECONDS) }
+
+            db?.let {
+                try {
+                    it.insertRawSocketTraffic(RawSocketItem(
+                        timestamp = now(), tool = "raw-socket-lbs",
+                        targetHost = targetHost, targetPort = targetPort,
+                        protocol = if (useTls) "TLS" else "TCP",
+                        tlsAlpn = if (useTls && alpnProtocols.isNotEmpty()) alpnProtocols.joinToString(",") else null,
+                        requestBytes = reqBytes,
+                        requestPreview = renderBytesPreview(reqBytes, 2000),
+                        responsePreview = out.joinToString("\n") { "#${it.index}: ${it.responsePreview.take(200)}" },
+                        bytesSent = reqBytes.size * count,
+                        bytesReceived = out.sumOf { it.bytesRead },
+                        elapsedMs = out.maxOfOrNull { it.elapsedMs },
+                        connectionCount = count,
+                        notes = "Last-byte sync: $count connections, spread=${out.maxOf { it.elapsedMs } - out.minOf { it.elapsedMs }}ms"
+                    ))
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log last-byte-sync traffic: ${e.message}")
+                }
+            }
+
             json.encodeToString(LastByteSyncResponse(out))
         } finally {
             sockets.forEach { s -> try { s.close() } catch (_: Exception) {} }

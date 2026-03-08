@@ -1,0 +1,103 @@
+=== Session Management ===
+
+Manage multiple authentication contexts for access control testing. Each session
+maintains its own cookie jar, headers, and CSRF token.
+
+--- TOOLS ---
+
+  session_create(name, cookies?, headers?)
+    Create named session with optional initial cookies/headers.
+    name: String
+    cookies: Map<String, String>?    Initial cookies
+    headers: Map<String, String>?    Initial headers (e.g., Authorization)
+
+  session_switch(name)
+    Switch active session context.
+
+  session_list()
+    List all sessions.
+
+  session_delete(name)
+    Remove a session.
+
+  session_get_headers(session?)
+    Returns Cookie header + custom headers ready for use.
+    Shows any stored CSRF token.
+
+  session_update_cookies(cookies, session?)
+    cookies: List<String>     "Set-Cookie: name=value; HttpOnly" or "name=value"
+    session: String?          Target session (defaults to current)
+
+  csrf_extract(response, customPatterns?)
+    response: String          HTTP response body to scan
+    customPatterns: List<String>?  Custom regex patterns
+    Built-in patterns: csrf_token, _token, csrfmiddlewaretoken,
+                       authenticity_token, X-CSRF-TOKEN, and more
+
+--- NAMING CONVENTIONS ---
+
+  Session Name      Purpose                    Typical Credentials
+  ----------------  -------------------------  ----------------------------
+  unauthenticated   Baseline, public access    None
+  low_priv          Standard user              wiener:peter, user:user
+  high_priv         Admin/elevated             administrator:admin
+  attacker          Account you control        Your test account
+  victim            Target for IDOR/CSRF       Simulated victim
+
+--- SETUP WORKFLOW ---
+
+  1. Create sessions:
+     session_create(name="unauthenticated")
+     session_create(name="low_priv")
+     session_create(name="high_priv")
+
+  2. Authenticate each:
+     session_switch(name="low_priv")
+     send_http1_request(
+       content="POST /login HTTP/1.1\nHost: target.com\nContent-Type: application/x-www-form-urlencoded\n\nusername=wiener&password=peter",
+       targetHostname="target.com", targetPort=443, usesHttps=true)
+     -> Cookies from Set-Cookie headers are stored automatically
+
+  3. Extract CSRF tokens:
+     session_switch(name="low_priv")
+     -> send GET to form page
+     -> csrf_extract(response=RESPONSE_BODY)
+     -> Token stored in active session
+
+  4. Verify setup:
+     session_list() -> confirm all sessions have cookies
+
+--- ACCESS CONTROL TESTING PATTERN ---
+
+  For each protected endpoint:
+    session_switch(name="high_priv") -> send request -> capture response
+    session_switch(name="low_priv")  -> send SAME request -> compare
+    session_switch(name="unauthenticated") -> send SAME request -> compare
+    compare_responses(response1=ADMIN_RESP, response2=USER_RESP)
+    -> If responses match = missing access control
+
+--- IDOR TESTING PATTERN ---
+
+  session_switch(name="victim")
+  -> GET /api/my-account -> extract victim's object IDs
+
+  session_switch(name="attacker")
+  -> GET /api/users/{victim_id} -> if 200 with victim data = IDOR
+
+--- SESSION FIXATION TEST ---
+
+  1. Get session cookie as unauthenticated
+  2. Set that cookie on victim session
+  3. Authenticate victim
+  4. Check if session ID changed after login
+  -> If same = session fixation vulnerability
+
+--- TROUBLESHOOTING ---
+
+  Issue                  Symptom                    Solution
+  ---------------------  -------------------------  --------------------------------
+  Session not switching  Same cookies in all reqs   Verify session_switch called before request
+  Cookies not captured   Empty cookie jar           Check Set-Cookie headers in response
+  CSRF extraction fails  Token is None              Verify page contains token, check patterns
+  Session expired        401/403 after time         Re-authenticate, update cookies
+  Wrong session used     Unexpected access          Call session_list() to verify

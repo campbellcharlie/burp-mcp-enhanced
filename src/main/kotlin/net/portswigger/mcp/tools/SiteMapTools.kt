@@ -1,13 +1,17 @@
 package net.portswigger.mcp.tools
 
 import burp.api.montoya.MontoyaApi
+import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.sitemap.SiteMapFilter
 import io.modelcontextprotocol.kotlin.sdk.server.Server
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.schema.toSerializableForm
+import net.portswigger.mcp.security.HttpRequestSecurity
 import java.util.regex.Pattern
 
 private val json = Json { prettyPrint = true }
@@ -15,7 +19,7 @@ private val json = Json { prettyPrint = true }
 /**
  * Register sitemap enumeration tools using the Montoya SiteMap API.
  */
-fun Server.registerSiteMapTools(api: MontoyaApi) {
+fun Server.registerSiteMapTools(api: MontoyaApi, config: McpConfig? = null) {
 
     mcpTool<GetSiteMapUrls>(
         "List all URLs discovered in the sitemap. Optionally filter by host prefix."
@@ -134,8 +138,16 @@ fun Server.registerSiteMapTools(api: MontoyaApi) {
         val httpService = burp.api.montoya.http.HttpService.httpService(host, port, usesHttps)
         val request = HttpRequest.httpRequest(httpService, requestContent.replace("\n", "\r\n"))
 
-        // Send the request to get a response, then add to sitemap
-        val requestResponse = api.http().sendRequest(request)
+        if (config != null) {
+            val allowed = runBlocking {
+                HttpRequestSecurity.checkHttpRequestPermission(host, port, config, requestContent, api)
+            }
+            if (!allowed) {
+                return@mcpTool "Add to sitemap denied by security policy"
+            }
+        }
+
+        val requestResponse = api.http().sendRequest(request, HttpMode.HTTP_1)
 
         api.siteMap().add(requestResponse)
 

@@ -1,0 +1,95 @@
+=== Traffic Search & Analysis ===
+
+Traffic is logged to a SQLite database by the MCP extension. All requests flowing through
+Burp are captured and searchable.
+
+--- SEARCH TOOLS ---
+
+  search_traffic -- FTS5 full-text search across all fields
+    Parameters:
+      query: String       FTS5 query syntax
+      method: String?     Filter by HTTP method (GET, POST, etc.)
+      host: String?       Filter by hostname
+      statusCode: Int?    Filter by response status code
+      toolSource: String? Filter by Burp tool source
+      limit: Int = 100    Max results
+      offset: Int = 0     Pagination offset
+
+    FTS5 query syntax:
+      Simple:     search_traffic(query="password")
+      AND:        search_traffic(query="password AND reset")
+      OR:         search_traffic(query="admin OR administrator")
+      NOT:        search_traffic(query="admin NOT login")
+      Phrase:     search_traffic(query="\"access token\"")
+      Prefix:     search_traffic(query="auth*")
+      Combined:   search_traffic(query="api AND (user OR account)", host="target.com")
+
+  search_traffic_regex -- Regex search in a specific field
+    Parameters:
+      pattern: String     Regex pattern
+      searchIn: String    Field to search:
+                            URL, REQUEST_HEADERS, REQUEST_BODY,
+                            RESPONSE_HEADERS, RESPONSE_BODY
+      limit: Int = 100
+
+    Example:
+      search_traffic_regex(pattern="Bearer [A-Za-z0-9._-]+", searchIn="REQUEST_HEADERS")
+      search_traffic_regex(pattern="password|secret|token", searchIn="RESPONSE_BODY")
+
+  get_traffic_by_id -- Full request/response for a specific item
+    Parameters:
+      id: Long            Traffic item ID (from search results)
+
+--- ANALYSIS TOOLS ---
+
+  get_endpoints         List unique URL paths (optionally filtered by host)
+  get_parameters        Extract unique parameters (query + body)
+  get_response_types    Content-type distribution
+  get_status_distribution  HTTP status code distribution
+  get_traffic_stats     Overall traffic statistics
+
+--- TAGGING ---
+
+  tag_traffic           Add tag + optional note to a traffic item
+  get_tagged_traffic    Retrieve items by tag
+  list_tags             See all tags with counts
+  delete_traffic_tag    Remove a tag
+
+--- REPLAY & COMPARE ---
+
+  replay_from_db -- Replay a logged request with modifications
+    Parameters:
+      trafficId: Long                   Traffic item ID to replay
+      modifiedHeadersJson: String?      JSON object of header overrides
+      modifiedBody: String?             Replacement body
+
+  compare_traffic -- Compare two traffic items
+    Parameters:
+      id1: Long
+      id2: Long
+      compareRequests: Boolean = true
+      compareResponses: Boolean = true
+
+--- WORDLIST ---
+
+  generate_wordlist     Generate fuzzing wordlist from observed paths/parameters
+
+WORKFLOW
+
+  Reconnaissance:
+    get_endpoints(host="target.com") -> map attack surface
+    get_parameters(host="target.com") -> identify injection points
+    get_response_types() -> understand application structure
+
+  Finding injection points:
+    search_traffic_regex(pattern="id=[0-9]+", searchIn="URL") -> IDOR candidates
+    search_traffic_regex(pattern="token|session|jwt", searchIn="RESPONSE_BODY") -> auth tokens
+
+  Investigation:
+    search_traffic(query="admin", host="target.com") -> find admin endpoints
+    get_traffic_by_id(id=123) -> inspect full request/response
+    replay_from_db(trafficId=123, modifiedBody="role=admin") -> test parameter tampering
+
+  Tagging:
+    tag_traffic(id=123, tag="sqli", note="Error on single quote in id param")
+    get_tagged_traffic(tag="sqli") -> review all SQLi candidates

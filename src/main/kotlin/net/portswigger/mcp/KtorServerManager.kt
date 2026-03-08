@@ -117,7 +117,8 @@ class KtorServerManager(
                     }
 
                     mcpServer.registerTools(api, config)
-                    mcpServer.registerRawSocketTools(api, config)
+                    mcpServer.registerRawSocketTools(api, config, db)
+                    mcpServer.registerHttp2SequenceTools(api, config, db)
 
                     // Register enhanced tools if database/logger are available
                     if (db != null && trafficLogger != null) {
@@ -128,12 +129,14 @@ class KtorServerManager(
                     mcpServer.registerJwtTools()
                     mcpServer.registerDiffTools()
                     mcpServer.registerGraphqlTools(api)
-                    mcpServer.registerCollaboratorTools(api)
+                    mcpServer.registerCollaboratorTools(api, db)
 
                     // Register new Phase 1 tools
                     mcpServer.registerScopeTools(api)
-                    mcpServer.registerSiteMapTools(api)
+                    mcpServer.registerSiteMapTools(api, config)
                     mcpServer.registerScannerTools(api)  // Professional only - checks edition internally
+                    mcpServer.registerHelpTools()
+                    mcpServer.registerTemplateTools(api, config, db)
                 }.apply {
                     start(wait = false)
                 }

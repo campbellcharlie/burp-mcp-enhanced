@@ -1,20 +1,20 @@
 package net.portswigger.mcp.config
 
 import burp.api.montoya.logging.Logging
-import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.persistence.Preferences
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.properties.ReadWriteProperty
 import kotlin.reflect.KProperty
 
-class McpConfig(storage: PersistedObject, private val logging: Logging) {
+class McpConfig(storage: Preferences, private val logging: Logging) {
 
     var enabled by storage.boolean(true)
-    var configEditingTooling by storage.boolean(false)
+    var configEditingTooling by storage.boolean(true)
     var host by storage.string("127.0.0.1")
     var port by storage.int(9876)
-    var requireHttpRequestApproval by storage.boolean(true)
-    var requireHistoryAccessApproval by storage.boolean(true)
+    var requireHttpRequestApproval by storage.boolean(false)
+    var requireHistoryAccessApproval by storage.boolean(false)
 
     // Database configuration
     var trafficLoggingEnabled by storage.boolean(true)
@@ -28,7 +28,7 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     // Raw socket tools (dangerous; intended for lab environments)
     var rawSocketToolsEnabled by storage.boolean(false)
 
-    private var _alwaysAllowHttpHistory by storage.boolean(false)
+    private var _alwaysAllowHttpHistory by storage.boolean(true)
     var alwaysAllowHttpHistory: Boolean
         get() = _alwaysAllowHttpHistory
         set(value) {
@@ -38,7 +38,7 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
             }
         }
 
-    private var _alwaysAllowWebSocketHistory by storage.boolean(false)
+    private var _alwaysAllowWebSocketHistory by storage.boolean(true)
     var alwaysAllowWebSocketHistory: Boolean
         get() = _alwaysAllowWebSocketHistory
         set(value) {
@@ -218,19 +218,19 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     }
 }
 
-fun PersistedObject.boolean(default: Boolean = false) =
-    PersistedDelegate(getter = { key -> getBoolean(key) ?: default }, setter = { key, value -> setBoolean(key, value) })
+fun Preferences.boolean(default: Boolean = false) =
+    PreferencesDelegate(getter = { key -> getBoolean(key) ?: default }, setter = { key, value -> setBoolean(key, value) })
 
-fun PersistedObject.string(default: String) =
-    PersistedDelegate(getter = { key -> getString(key) ?: default }, setter = { key, value -> setString(key, value) })
+fun Preferences.string(default: String) =
+    PreferencesDelegate(getter = { key -> getString(key) ?: default }, setter = { key, value -> setString(key, value) })
 
-fun PersistedObject.int(default: Int) =
-    PersistedDelegate(getter = { key -> getInteger(key) ?: default }, setter = { key, value -> setInteger(key, value) })
+fun Preferences.int(default: Int) =
+    PreferencesDelegate(getter = { key -> getInteger(key) ?: default }, setter = { key, value -> setInteger(key, value) })
 
-fun PersistedObject.stringList(default: String) =
-    PersistedDelegate(getter = { key -> getString(key) ?: default }, setter = { key, value -> setString(key, value) })
+fun Preferences.stringList(default: String) =
+    PreferencesDelegate(getter = { key -> getString(key) ?: default }, setter = { key, value -> setString(key, value) })
 
-class PersistedDelegate<T>(
+class PreferencesDelegate<T>(
     private val getter: (name: String) -> T, private val setter: (name: String, value: T) -> Unit
 ) : ReadWriteProperty<Any, T> {
     override fun getValue(thisRef: Any, property: KProperty<*>) = getter(property.name)

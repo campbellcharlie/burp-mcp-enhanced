@@ -57,6 +57,7 @@ fun Server.registerSessionTools(db: DatabaseService) {
         )
 
         SessionManager.setSession(name, session)
+        SessionManager.currentSession = name
 
         // Also persist to database
         try {
@@ -66,7 +67,7 @@ fun Server.registerSessionTools(db: DatabaseService) {
         }
 
         buildString {
-            appendLine("=== Session Created ===")
+            appendLine("=== Session Created (Active) ===")
             appendLine()
             appendLine("Name: $name")
             if (cookies?.isNotEmpty() == true) {
@@ -116,8 +117,9 @@ fun Server.registerSessionTools(db: DatabaseService) {
         }
     }
 
-    mcpTool<SessionList>(
-        "List all available sessions."
+    mcpTool(
+        name = "session_list",
+        description = "List all available sessions."
     ) {
         val memorySessions = SessionManager.listSessions()
         val dbSessions = db.listSessions()
@@ -314,9 +316,6 @@ data class SessionCreate(
 
 @Serializable
 data class SessionSwitch(val name: String)
-
-@Serializable
-data class SessionList(val dummy: String = "")
 
 @Serializable
 data class SessionDelete(val name: String)

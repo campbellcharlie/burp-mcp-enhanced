@@ -1,6 +1,7 @@
 package net.portswigger.mcp.tools
 
 import burp.api.montoya.MontoyaApi
+import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.message.requests.HttpRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.Serializable
@@ -24,6 +25,9 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
         "Search logged HTTP traffic using FTS5 full-text search. " +
         "Supports advanced query syntax: AND, OR, NOT, phrase matching with quotes, prefix matching with *."
     ) {
+        // Flush pending traffic so search sees recently-captured data
+        logger.flush()
+
         val results = db.searchTraffic(
             query = query,
             method = method?.uppercase(),
@@ -43,7 +47,7 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
                 results.forEachIndexed { i, r ->
                     appendLine("${i + 1}. [${r.id}] ${r.method} ${r.url}")
                     appendLine("   Host: ${r.host}:${r.port} | Status: ${r.statusCode ?: "pending"} | Tool: ${r.toolSource}")
-                    appendLine("   Time: ${java.time.Instant.ofEpochMilli(r.timestamp)}")
+                    appendLine("   Time: ${r.timestamp}")
                     if (r.contentType != null) appendLine("   Content-Type: ${r.contentType}")
                     appendLine()
                 }
@@ -61,19 +65,31 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
             return@mcpTool "Invalid searchIn field: $searchIn. Valid values: ${SearchField.entries.joinToString()}"
         }
 
-        val results = db.searchTrafficRegex(
+        // Flush pending traffic so search sees recently-captured data
+        logger.flush()
+
+        val response = db.searchTrafficRegex(
             pattern = pattern,
             searchIn = field,
+            host = host,
             limit = limit
         )
 
-        if (results.isEmpty()) {
-            "No results found for regex: $pattern in $searchIn"
+        if (response.results.isEmpty()) {
+            buildString {
+                append("No results found for regex: $pattern in $searchIn")
+                if (response.scanLimitReached) {
+                    append(" (scanned ${response.scannedRows} most recent rows — try narrowing with host filter)")
+                }
+            }
         } else {
             buildString {
-                appendLine("Found ${results.size} results matching /$pattern/ in $searchIn:")
+                appendLine("Found ${response.results.size} results matching /$pattern/ in $searchIn:")
+                if (response.scanLimitReached) {
+                    appendLine("NOTE: Scan limit reached (${response.scannedRows} rows). Results may be incomplete — use host filter to narrow scope.")
+                }
                 appendLine()
-                results.forEachIndexed { i, r ->
+                response.results.forEachIndexed { i, r ->
                     appendLine("${i + 1}. [${r.id}] ${r.method} ${r.url}")
                     appendLine("   Host: ${r.host}:${r.port} | Status: ${r.statusCode ?: "pending"}")
                     appendLine()
@@ -91,7 +107,7 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
         buildString {
             appendLine("=== Traffic Item #${detail.id} ===")
             appendLine()
-            appendLine("Timestamp: ${java.time.Instant.ofEpochMilli(detail.timestamp)}")
+            appendLine("Timestamp: ${detail.timestamp}")
             appendLine("Tool: ${detail.toolSource}")
             appendLine("URL: ${detail.url}")
             appendLine("Host: ${detail.host}:${detail.port}")
@@ -122,8 +138,9 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
         }
     }
 
-    mcpTool<GetTrafficStats>(
-        "Get traffic statistics including total requests, top hosts, method distribution, and status code distribution."
+    mcpTool(
+        name = "get_traffic_stats",
+        description = "Get traffic statistics including total requests, top hosts, method distribution, and status code distribution."
     ) {
         val stats = db.getStats()
         val loggerStats = logger.getStats()
@@ -204,7 +221,7 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
                         appendLine("=== ${ep.host} ===")
                     }
                     appendLine("  ${ep.method.padEnd(7)} ${ep.url}")
-                    appendLine("       Requests: ${ep.requestCount} | First: ${java.time.Instant.ofEpochMilli(ep.firstSeen)} | Last: ${java.time.Instant.ofEpochMilli(ep.lastSeen)}")
+                    appendLine("       Requests: ${ep.requestCount} | First: ${ep.firstSeen} | Last: ${ep.lastSeen}")
                 }
             }
         }
@@ -321,7 +338,7 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
                 appendLine("Tags:")
                 appendLine()
                 tags.forEach { t ->
-                    appendLine("  ${t.tag.padEnd(30)} ${t.count} items | Last used: ${java.time.Instant.ofEpochMilli(t.lastUsed)}")
+                    appendLine("  ${t.tag.padEnd(30)} ${t.count} items | Last used: ${java.time.Instant.ofEpochMilli(t.lastUsed)}")  // tagCreatedAt is still epoch millis
                 }
             }
         }
@@ -384,7 +401,7 @@ fun Server.registerTrafficTools(db: DatabaseService, logger: TrafficLogger, api:
 
             val httpService = burp.api.montoya.http.HttpService.httpService(detail.host, detail.port, detail.isHttps)
             val request = HttpRequest.httpRequest(httpService, fullRequest.replace("\n", "\r\n"))
-            val response = api.http().sendRequest(request)
+            val response = api.http().sendRequest(request, HttpMode.HTTP_1)
 
             response?.toString() ?: "<no response>"
         }
@@ -518,14 +535,12 @@ data class SearchTraffic(
 data class SearchTrafficRegex(
     val pattern: String,
     val searchIn: String = "RESPONSE_BODY",
+    val host: String? = null,
     val limit: Int = 100
 )
 
 @Serializable
 data class GetTrafficById(val id: Long)
-
-@Serializable
-data class GetTrafficStats(val dummy: String = "")
 
 @Serializable
 data class SetTrafficLogging(

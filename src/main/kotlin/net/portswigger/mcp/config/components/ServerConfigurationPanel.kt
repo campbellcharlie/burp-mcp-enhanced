@@ -15,9 +15,6 @@ class ServerConfigurationPanel(
     private val validationErrorLabel: WarningLabel
 ) : JPanel() {
 
-    private lateinit var alwaysAllowHttpHistoryCheckBox: JCheckBox
-    private lateinit var alwaysAllowWebSocketHistoryCheckBox: JCheckBox
-
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         updateColors()
@@ -47,44 +44,12 @@ class ServerConfigurationPanel(
         add(enabledPanel)
         add(createVerticalStrut(Design.Spacing.MD))
 
-        val configEditingToolingCheckBox = createCheckBoxWithSubtitle(
-            "Enable tools that can edit your config",
-            "WARNING: Can execute code",
-            config.configEditingTooling
-        ) { config.configEditingTooling = it }
-        add(configEditingToolingCheckBox)
-        add(createVerticalStrut(Design.Spacing.MD))
-
-        val httpRequestApprovalCheckBox = createStandardCheckBox(
-            "Require approval for HTTP requests", config.requireHttpRequestApproval
-        ) { config.requireHttpRequestApproval = it }
-        add(httpRequestApprovalCheckBox)
-        add(createVerticalStrut(Design.Spacing.MD))
-
         val rawSocketToolsCheckBox = createCheckBoxWithSubtitle(
             "Enable raw socket tools",
-            "WARNING: Allows arbitrary TCP/TLS byte sends to allowlisted targets",
+            "Allows arbitrary TCP/TLS byte sends (for lab environments)",
             config.rawSocketToolsEnabled
         ) { config.rawSocketToolsEnabled = it }
         add(rawSocketToolsCheckBox)
-        add(createVerticalStrut(Design.Spacing.MD))
-
-        val historyAccessApprovalCheckBox = createHistoryAccessApprovalCheckBox()
-        add(historyAccessApprovalCheckBox)
-        add(createVerticalStrut(Design.Spacing.SM))
-
-        alwaysAllowHttpHistoryCheckBox = createIndentedCheckBox(
-            "Always allow HTTP history access", config.alwaysAllowHttpHistory, config.requireHistoryAccessApproval
-        ) { config.alwaysAllowHttpHistory = it }
-        add(alwaysAllowHttpHistoryCheckBox)
-        add(createVerticalStrut(Design.Spacing.SM))
-
-        alwaysAllowWebSocketHistoryCheckBox = createIndentedCheckBox(
-            "Always allow WebSocket history access",
-            config.alwaysAllowWebSocketHistory,
-            config.requireHistoryAccessApproval
-        ) { config.alwaysAllowWebSocketHistory = it }
-        add(alwaysAllowWebSocketHistoryCheckBox)
 
         add(validationErrorLabel)
     }
@@ -101,59 +66,6 @@ class ServerConfigurationPanel(
         enabledPanel.add(createHorizontalStrut(Design.Spacing.MD))
         enabledPanel.add(enabledToggle)
         return enabledPanel
-    }
-
-    private fun createHistoryAccessApprovalCheckBox(): JCheckBox {
-        return createStandardCheckBox(
-            "Require approval for history access", config.requireHistoryAccessApproval
-        ) { enabled ->
-            config.requireHistoryAccessApproval = enabled
-            if (!enabled) {
-                config.alwaysAllowHttpHistory = false
-                config.alwaysAllowWebSocketHistory = false
-                alwaysAllowHttpHistoryCheckBox.isSelected = false
-                alwaysAllowWebSocketHistoryCheckBox.isSelected = false
-            }
-            alwaysAllowHttpHistoryCheckBox.isEnabled = enabled
-            alwaysAllowWebSocketHistoryCheckBox.isEnabled = enabled
-        }
-    }
-
-    fun updateHistoryAccessCheckboxes() {
-        SwingUtilities.invokeLater {
-            alwaysAllowHttpHistoryCheckBox.isSelected = config.alwaysAllowHttpHistory
-            alwaysAllowWebSocketHistoryCheckBox.isSelected = config.alwaysAllowWebSocketHistory
-        }
-    }
-
-    private fun createStandardCheckBox(
-        text: String, initialValue: Boolean, onChange: (Boolean) -> Unit
-    ): JCheckBox {
-        return JCheckBox(text).apply {
-            alignmentX = LEFT_ALIGNMENT
-            isSelected = initialValue
-            font = Design.Typography.bodyLarge
-            foreground = Design.Colors.onSurface
-            addItemListener { event ->
-                onChange(event.stateChange == ItemEvent.SELECTED)
-            }
-        }
-    }
-
-    private fun createIndentedCheckBox(
-        text: String, initialValue: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit
-    ): JCheckBox {
-        return JCheckBox(text).apply {
-            alignmentX = LEFT_ALIGNMENT
-            isSelected = initialValue
-            isEnabled = enabled
-            font = Design.Typography.bodyMedium
-            foreground = Design.Colors.onSurfaceVariant
-            border = BorderFactory.createEmptyBorder(0, Design.Spacing.LG, 0, 0)
-            addItemListener { event ->
-                onChange(event.stateChange == ItemEvent.SELECTED)
-            }
-        }
     }
 
     private fun createCheckBoxWithSubtitle(

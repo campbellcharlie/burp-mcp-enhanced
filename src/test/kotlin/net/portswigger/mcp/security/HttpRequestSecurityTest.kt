@@ -1,7 +1,7 @@
 package net.portswigger.mcp.security
 
 import burp.api.montoya.logging.Logging
-import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.persistence.Preferences
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test
 
 class HttpRequestSecurityTest {
 
-    private lateinit var persistedObject: PersistedObject
+    private lateinit var preferences: Preferences
     private lateinit var config: McpConfig
     private lateinit var mockApprovalHandler: UserApprovalHandler
     private lateinit var originalApprovalHandler: UserApprovalHandler
@@ -36,7 +36,7 @@ class HttpRequestSecurityTest {
             "port" to 9876
         )
 
-        persistedObject = mockk<PersistedObject>().apply {
+        preferences = mockk<Preferences>().apply {
             every { getBoolean(any()) } answers { storage[firstArg()] as? Boolean ?: false }
             every { getString(any()) } answers { storage[firstArg()] as? String ?: "" }
             every { getInteger(any()) } answers { storage[firstArg()] as? Int ?: 0 }
@@ -55,7 +55,7 @@ class HttpRequestSecurityTest {
             every { logToError(any<String>()) } returns Unit
         }
 
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(preferences, mockLogging)
     }
 
     @AfterEach
@@ -169,7 +169,7 @@ class HttpRequestSecurityTest {
             "port" to 9876
         )
 
-        persistedObject = mockk<PersistedObject>().apply {
+        val tempPreferences = mockk<Preferences>().apply {
             every { getBoolean(any()) } answers { storage[firstArg()] as? Boolean ?: false }
             every { getString(any()) } answers { storage[firstArg()] as? String ?: "" }
             every { getInteger(any()) } answers { storage[firstArg()] as? Int ?: 0 }
@@ -183,7 +183,7 @@ class HttpRequestSecurityTest {
                 storage[firstArg()] = secondArg<Int>()
             }
         }
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(tempPreferences, mockLogging)
 
         coEvery { mockApprovalHandler.requestApproval("empty.com", 80, config, any()) } returns false
 

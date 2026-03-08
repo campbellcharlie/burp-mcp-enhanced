@@ -135,7 +135,7 @@ For more information about the protocol visit: [modelcontextprotocol.io](https:/
 ### Building the Extension
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/burp-mcp-enhanced.git
+git clone https://github.com/campbellcharlie/burp-mcp-enhanced.git
 cd burp-mcp-enhanced
 ./gradlew embedProxyJar
 ```

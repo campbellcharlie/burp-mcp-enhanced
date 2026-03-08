@@ -9,7 +9,7 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.logging.Logging
-import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.persistence.Preferences
 import burp.api.montoya.proxy.Proxy
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import burp.api.montoya.utilities.Base64Utils
@@ -38,7 +38,7 @@ import java.net.ServerSocket
 import javax.swing.JTextArea
 
 class ToolsKtTest {
-    
+
     private val client = TestSseMcpClient()
     private val api = mockk<MontoyaApi>(relaxed = true)
     private val serverManager = KtorServerManager(api, null, null)
@@ -49,7 +49,7 @@ class ToolsKtTest {
     private val capturedRequest = slot<HttpRequest>()
 
     init {
-        val persistedObject = mockk<PersistedObject>().apply {
+        val preferences = mockk<Preferences>().apply {
             every { getBoolean("enabled") } returns true
             every { getBoolean("configEditingTooling") } returns true
             every { getBoolean("requireHttpRequestApproval") } returns false
@@ -68,7 +68,7 @@ class ToolsKtTest {
             every { logToOutput(any<String>()) } returns Unit
         }
 
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(preferences, mockLogging)
         
         mockkStatic(HttpHeader::class)
         mockkStatic(burp.api.montoya.http.HttpService::class)
@@ -168,7 +168,7 @@ class ToolsKtTest {
             }
             every { api.http() } returns httpService
             every { httpResponse.toString() } returns "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nResponse body"
-            every { httpService.sendRequest(capture(capturedRequest)) } returns httpResponse
+            every { httpService.sendRequest(capture(capturedRequest), any<HttpMode>()) } returns httpResponse
 
             runBlocking {
                 val result = client.callTool(
@@ -182,11 +182,11 @@ class ToolsKtTest {
 
                 delay(100)
                 val text = result.expectTextContent()
-                assertFalse(text.contains("Error"), 
+                assertFalse(text.contains("Error"),
                     "Expected success response but got error: $text")
             }
 
-            verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>()) }
+            verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>(), any<HttpMode>()) }
             assertEquals("GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n", capturedRequest.captured.toString(), "Request body should match")
         }
 
@@ -202,7 +202,7 @@ class ToolsKtTest {
                 }
             }
             every { api.http() } returns httpService
-            every { httpService.sendRequest(any()) } returns null
+            every { httpService.sendRequest(any(), any<HttpMode>()) } returns null
 
             runBlocking {
                 val result = client.callTool(

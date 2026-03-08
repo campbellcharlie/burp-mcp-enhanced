@@ -1,0 +1,82 @@
+=== Raw TCP/TLS Socket Tools ===
+
+For advanced HTTP smuggling, desync, and pause-based attacks.
+Requires: raw socket tools enabled in Burp MCP settings + target in allowlist.
+
+--- send_raw_tcp ---
+
+  Parameters:
+    targetHost: String              Target hostname
+    targetPort: Int                 Target port
+    segments: List<RawSegment>      Each has bytesBase64 + delayMs
+    connectTimeoutMs: Int = 5000    Connection timeout
+    readTimeoutMs: Int = 1500       Read timeout per chunk
+    maxReadBytes: Int = 200000      Max response bytes
+    responsePreviewBytes: Int = 2000 Preview length in output
+    flushEach: Boolean = true       Flush after each segment
+
+  Segments allow precise byte-level control with timing:
+    segments=[
+      {"bytesBase64": "<first chunk base64>", "delayMs": 0},
+      {"bytesBase64": "<second chunk base64>", "delayMs": 5000}
+    ]
+
+--- send_raw_tls ---
+
+  Same as send_raw_tcp plus:
+    alpnProtocols: List<String>     ALPN protocols (e.g., ["h2", "http/1.1"])
+    insecureSkipVerify: Boolean     Skip TLS certificate verification
+
+--- last_byte_sync_raw ---
+
+  True last-byte synchronization for race conditions.
+
+  Parameters:
+    targetHost: String              Target hostname
+    targetPort: Int                 Target port
+    useTls: Boolean = true          Use TLS
+    requestBase64: String           Full HTTP request as base64
+    count: Int = 20                 Simultaneous connections (2-50)
+    alpnProtocols: List<String>     TLS ALPN protocols
+    insecureSkipVerify: Boolean     Skip TLS verification
+    includeResponseBase64: Boolean  Include full response base64
+
+  Workflow:
+    1. Opens N raw TCP/TLS connections
+    2. Sends all-but-last byte on each connection
+    3. Releases final bytes simultaneously
+    -> Sub-millisecond timing precision
+
+--- USE CASES ---
+
+  HTTP Request Smuggling:
+    1. Craft malicious request with CL/TE ambiguity
+    2. Base64-encode it
+    3. Use send_raw_tcp/send_raw_tls with segments
+    4. Add delays between segments for pause-based desync
+
+  Example -- CL.TE smuggling via raw socket:
+    Craft request with Content-Length that includes smuggled request,
+    but Transfer-Encoding: chunked terminates early.
+    Use send_raw_tls with segment delays to control timing.
+
+  Pause-Based Desync:
+    send_raw_tls(
+      targetHost="target.com",
+      targetPort=443,
+      segments=[
+        {"bytesBase64": "<headers + partial body>", "delayMs": 0},
+        {"bytesBase64": "<remaining body>", "delayMs": 60000}
+      ],
+      alpnProtocols=["http/1.1"]
+    )
+    -> 60-second pause triggers server timeout, treating remaining data as new request
+
+  Race Conditions (sub-ms precision):
+    last_byte_sync_raw(
+      targetHost="target.com",
+      targetPort=443,
+      useTls=true,
+      requestBase64="<base64 encoded HTTP request>",
+      count=20
+    )

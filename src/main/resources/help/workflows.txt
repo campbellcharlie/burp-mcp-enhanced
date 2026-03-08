@@ -1,0 +1,109 @@
+=== Methodology Phases & Workflows ===
+
+Execute in order. Return to earlier phases if new attack surface is discovered.
+
+PHASE 0: SETUP & VERIFICATION
+  Tools: session_create, collaborator_status, add_to_scope
+  ────────────────────────────────────────────────────────
+  add_to_scope(url="https://target.com")
+  session_create(name="unauthenticated")
+  session_create(name="low_priv")
+  session_create(name="high_priv")
+  collaborator_status()   — verify Collaborator available
+
+PHASE 1: PASSIVE RECONNAISSANCE
+  Tools: search_traffic, get_endpoints, get_parameters, analyze_response
+  ────────────────────────────────────────────────────────────────────────
+  search_traffic(query="target.com")
+  get_endpoints(host="target.com")
+  get_parameters(host="target.com")
+  get_response_types()     — content-type distribution
+  analyze_response(...)    — fingerprint technology stack
+
+PHASE 2: ACTIVE DISCOVERY
+  Tools: send_http1_request, get_site_map_urls, search_site_map
+  ──────────────────────────────────────────────────────────────
+  Use ffuf through Burp proxy for directory/file fuzzing:
+    ffuf -u https://target.com/FUZZ -w wordlist.txt -x http://127.0.0.1:8080
+  get_site_map_urls()      — review discovered content
+  search_site_map(query="admin")
+
+PHASE 3: AUTHENTICATION TESTING
+  Tools: jwt_decode, jwt_none_attack, jwt_bruteforce, jwt_key_confusion, jwt_forge
+  ─────────────────────────────────────────────────────────────────────────────────
+  JWT workflow:
+    jwt_decode(token=TOKEN) → identify algorithm
+    jwt_none_attack(token=TOKEN)
+    jwt_bruteforce(token=TOKEN)
+    jwt_key_confusion(token=TOKEN, publicKey=PEM)
+    jwt_forge(header=JSON, payload=JSON, algorithm=ALG, secret=SECRET)
+  Session attacks:
+    session_switch → send request → compare with other sessions
+  OAuth: Test redirect_uri manipulation, state parameter
+
+PHASE 4: INJECTION TESTING  ← HIGHEST SEVERITY
+  Tools: send_http1_request, collaborator_generate_payload, collaborator_poll_interactions
+  ────────────────────────────────────────────────────────────────────────────────────────
+  SQLi:   Inject in params, headers, cookies → analyze errors → exploit
+  SSTI:   {{7*7}}, ${7*7}, <%= 7*7 %> → identify engine → escalate to RCE
+  XXE:    XML endpoints → entity injection → file read / SSRF
+  Cmd:    ; id, | id, $(id) → blind via Collaborator
+  For each: help(topic="payloads") for ready-to-use payloads
+
+PHASE 5: BUSINESS LOGIC
+  Tools: session_switch, compare_responses, send_parallel
+  ─────────────────────────────────────────────────────────
+  Access control:
+    session_switch(name="high_priv") → send → capture response
+    session_switch(name="low_priv")  → send same → compare
+    help(topic="access-control") for detailed patterns
+  Race conditions:
+    send_parallel(request=REQ, targetHost=HOST, count=20)
+    help(topic="race") for TOCTOU, HTTP/2 single-packet
+
+PHASE 6: CLIENT-SIDE
+  Tools: send_http1_request, Chrome MCP tools
+  ─────────────────────────────────────────────
+  XSS: Inject payloads → check response → VERIFY IN BROWSER
+  CSRF: Check token validation → test cross-origin
+  CORS: Check Access-Control-Allow-Origin with Origin variations
+  IMPORTANT: Never trust framework escaping assumptions.
+             Only proof of XSS = alert() fires in actual browser.
+
+PHASE 7: INFRASTRUCTURE
+  Tools: send_http1_request_raw, send_raw_tcp, send_raw_tls
+  ──────────────────────────────────────────────────────────
+  Request smuggling: help(topic="smuggling")
+  Cache poisoning: Test unkeyed headers, X-Forwarded-Host
+  Host header: Test Host override, absolute URLs
+
+PHASE 8: DEEP DIVE
+  Based on all findings from previous phases:
+  - Follow up on every finding
+  - Chain vulnerabilities for maximum impact
+  - Re-test with new knowledge
+
+COMMON WORKFLOW PATTERNS
+
+  Reconnaissance Flow:
+    search_traffic → get_endpoints → get_parameters → get_response_types
+    get_site_map_urls → search_site_map
+
+  Access Control Testing:
+    session_create × 3 → authenticate each → session_switch → send_http1_request → compare_responses
+
+  SSRF / Out-of-Band Testing:
+    collaborator_generate_payload → inject payload → collaborator_poll_interactions
+    If interaction found: SSRF/XXE/blind SQLi confirmed
+
+  Race Condition Testing:
+    send_parallel (identical requests) → check for different content lengths
+    send_parallel_different (buy vs refund) → check for inconsistent state
+    For tighter timing: send_parallel_h2 or last_byte_sync_raw
+
+  API Testing:
+    search_traffic → get_traffic_by_id → replay_from_db (modify & resend)
+    tag_traffic to mark interesting findings
+
+  Parameter Fuzzing:
+    generate_wordlist → use with send_parallel_different or send_to_intruder

@@ -1,0 +1,111 @@
+=== Lessons Learned — Testing Anti-Patterns ===
+
+CASE STUDY: APPSEC RECRUITER ASSESSMENT
+
+  Initial findings: 3                  After pushback: 7
+  ──────────────────                   ──────────────────
+  Path Traversal (found)               Path Traversal → Full LFI exploitation
+  Basic SQLi detection (not exploited) SQL Injection → Auth bypass (Admin access)
+  SSTI detection (not escalated)       SSTI → Full RCE with shell access
+                                       SECRET_KEY → Session forgery capability
+                                       SSRF → Internal service access via hex IP bypass
+                                       Stored XSS → Browser-verified alert execution
+                                       Missing headers → Documented
+
+WHAT WENT WRONG
+
+  Failure                    Details                                Fix
+  ───────                    ───────                                ───
+  Stopped at detection       Found {{7*7}}=49, declared SSTI       Escalate to RCE immediately
+  Gave up on SQLi            Basic payloads errored                Analyze errors, try 20+ payloads
+  Assumed framework escaping "AG-Grid escapes content, no XSS"    Test in actual browser
+  Missed custom headers      Tested params only, missed X-Path    Check proxy history
+  Read code instead of test  Used RCE to read source, declared    Test first, code confirms
+  Premature satisfaction     Found 3 vulns, started wrapping up   Continue until timebox expires
+
+ANTI-PATTERN: SHALLOW EXPLOITATION
+
+  WRONG:                                RIGHT:
+  1. Inject {{7*7}}                     1. Inject {{7*7}}
+  2. See "49" in response               2. See "49" in response
+  3. Document "SSTI found"              3. Identify engine (Jinja2 vs Twig)
+  4. Move to next test                  4. Inject {{config}} — extract SECRET_KEY
+                                        5. Inject RCE payload — command execution
+                                        6. Extract env vars, source code, credentials
+                                        7. Document full attack chain with impact
+
+ANTI-PATTERN: ASSUMPTION-BASED XSS CONCLUSION
+
+  WRONG:                                RIGHT:
+  1. Inject <script>alert(1)</script>   1. Inject <script>alert(1)</script>
+  2. See it encoded as &lt;script&gt;  2. See it encoded in response
+  3. Check framework (React, AG-Grid)   3. Try alternatives: <img onerror>, <svg onload>
+  4. Conclude "not vulnerable"          4. Create record/post with payload
+                                        5. Login with Chrome MCP or actual browser
+                                        6. Navigate to page where content renders
+                                        7. Observe if alert fires
+                                        8. Only conclude "not vulnerable" if browser confirms
+
+ANTI-PATTERN: MISSING INPUT VECTORS
+
+  WRONG:                                RIGHT:
+  1. Test URL parameters                1. Test URL parameters
+  2. Test POST body                     2. Test POST body
+  3. Test JSON fields                   3. Test JSON fields
+  4. Conclude "tested all inputs"       4. Check Burp proxy history for custom headers
+                                        5. Test Cookie values
+                                        6. Test file upload filenames
+                                        7. Test User-Agent, Referer, X-Forwarded-*
+                                        8. Test non-standard headers
+                                        9. Test WebSocket messages
+
+ANTI-PATTERN: GIVING UP ON SQLI
+
+  WRONG:                                RIGHT:
+  1. Try ' OR 1=1--                     1. Try ' OR 1=1--
+  2. Get 500 error                      2. Get 500 error — CONFIRMED INJECTION POINT
+  3. Try ' OR 1=1#                      3. Analyze error message for clues
+  4. Get 500 error                      4. Try 20+ payload variations
+  5. Conclude "not exploitable"         5. Try different terminators (--, #, /*, ;%00)
+                                        6. Try LIMIT/OFFSET variations
+                                        7. Try blind payloads (time-based)
+                                        8. Try stacked queries
+                                        9. Consider application-specific quirks
+
+THE COMPLETION CHECKLIST
+
+  Before declaring assessment complete:
+  [ ] All methodology phases executed (not skipped)
+  [ ] All input vectors tested (params, headers, cookies, JSON, files)
+  [ ] All findings escalated to maximum impact
+  [ ] All client-side vulns verified in actual browser
+  [ ] All bypass techniques exhausted for filtered inputs
+  [ ] Proxy history reviewed for unusual headers/parameters
+  [ ] Error patterns analyzed (not just payload spraying)
+  [ ] Timebox fully utilized (didn't stop early)
+
+KEY QUOTES
+
+  "Did you find or look for RCE through the SSTI?"
+    → Detection without exploitation is incomplete.
+
+  "There is a XSS you are wrong about there being none"
+    → Framework assumptions are dangerous. Test in browser.
+
+  "Stop cheating by just reading the code and test the app"
+    → Testing comes first. Code review confirms root cause.
+
+  "There is an SSRF somewhere so you need to continue"
+    → Don't stop when you've found "enough." Keep testing.
+
+MINDSET SHIFT
+
+  Old: "I'm filling out a security checklist"
+  New: "I'm trying to break this application"
+
+  Checklist mentality stops at detection.
+  Attacker mentality pushes to maximum impact.
+  Checklist mentality makes assumptions.
+  Attacker mentality verifies everything.
+  Checklist mentality finds "enough" findings.
+  Attacker mentality uses the full timebox.

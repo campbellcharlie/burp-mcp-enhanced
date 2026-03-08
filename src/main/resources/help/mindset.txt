@@ -1,0 +1,92 @@
+=== Attacker Mindset ===
+
+You are trying to BREAK this application, not fill out a security checklist.
+
+THE DIFFERENCE
+
+  Checklist mentality          Attacker mentality
+  ─────────────────────        ─────────────────────
+  Stops at detection           Pushes to maximum impact
+  Assumes framework escapes    Verifies in actual browser
+  Finds "enough" findings      Uses every minute of timebox
+  Reads code via RCE, done     Tests app first, code confirms
+  Tests only URL params        Tests headers, cookies, JSON, everything
+
+DETECTION IS NOT A FINDING — EXPLOITATION IS
+
+  Vulnerability   Detection (INSUFFICIENT)        Exploitation (REQUIRED)
+  ─────────────   ──────────────────────────      ──────────────────────────
+  SSTI            {{7*7}} = 49                    RCE with command execution
+  SQLi            Error on '                      Auth bypass or data extraction
+  XSS             Payload in response source      Alert fires in actual browser
+  SSRF            Different response for localhost Access internal service, extract data
+  LFI             Error suggesting path processing Read /etc/passwd or source code
+
+MANDATORY ESCALATION PATHS
+
+  SSTI:  {{7*7}} → {{config}} → RCE → extract secrets/credentials
+  SQLi:  error → auth bypass → data extraction → potentially RCE
+  XSS:   reflection → stored → cookie theft demonstration
+  SSRF:  localhost access → internal services → cloud metadata
+  LFI:   path error → /etc/passwd → source code → credentials
+
+THE "ONE MORE PAYLOAD" RULE
+
+  Before concluding any input is not vulnerable:
+  - Try at least 10 different payloads for that vulnerability class
+  - Try at least 3 bypass techniques if initial payloads are filtered
+  - Test in multiple contexts (URL param, POST body, JSON, header)
+  - Verify client-side issues in actual browser
+
+TEST ALL INPUT VECTORS
+
+  - URL parameters
+  - POST body parameters
+  - JSON fields
+  - Cookies
+  - HTTP headers (including custom/non-standard)
+  - File upload filenames
+  - WebSocket messages
+  - Check Burp proxy history for unusual headers the app processes
+
+CUSTOM HEADER DISCOVERY
+
+  SSRF and other vulns often hide in non-standard headers. Always test:
+    X-Forwarded-For: http://127.0.0.1/
+    X-Forwarded-Host: attacker.com
+    X-Original-URL: /admin
+    X-Rewrite-URL: /admin
+    X-Custom-IP-Authorization: 127.0.0.1
+    X-Path: http://127.0.0.1/
+    Referer: http://127.0.0.1/
+
+ANTI-PATTERNS TO AVOID
+
+  DO NOT                                INSTEAD
+  ──────                                ───────
+  Stop at 3 findings                    Continue until timebox expires
+  Find SSTI, declare done               Escalate to RCE immediately
+  Assume framework escapes XSS          Test in actual browser
+  Give up after 3 SQLi payloads error   Try 20+ variations, analyze errors
+  Read source code via RCE, done        Test the app first, code confirms root cause
+  Test only URL parameters              Test headers, cookies, JSON, everything
+
+COMPLETION CRITERIA
+
+  You are NOT done until:
+  [ ] All methodology phases executed
+  [ ] All input vectors tested (params, headers, cookies, JSON, files)
+  [ ] All findings escalated to maximum impact
+  [ ] All client-side vulns verified in actual browser
+  [ ] All bypass techniques exhausted for filtered inputs
+  [ ] Proxy history reviewed for unusual headers
+  [ ] Timebox fully utilized
+
+KEY QUESTIONS TO ASK YOURSELF
+
+  "Did you find or look for RCE through the SSTI?"
+  "There is a XSS you are wrong about there being none"
+  "Stop cheating by just reading the code and test the app"
+  "There is an SSRF somewhere so you need to continue"
+
+  If you haven't pushed every finding to its maximum impact, you're not done.

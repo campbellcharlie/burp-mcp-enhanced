@@ -7,14 +7,13 @@ import kotlinx.serialization.json.Json
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.sql.Connection
+import java.sql.PreparedStatement
 import java.sql.Statement
 import java.util.regex.Pattern
 
 /**
  * Main database service for traffic logging and search.
- *
- * Thread-safety: Uses ConnectionPool for concurrent access.
- * WAL mode allows concurrent reads during writes.
+ * Uses http_traffic + http_messages schema matching sqlitedb_burp.
  */
 class DatabaseService(
     dbPath: Path,
@@ -24,8 +23,8 @@ class DatabaseService(
     private val pool = ConnectionPool(
         dbPath = dbPath.toString(),
         logging = logging,
-        minConnections = 2,
-        maxConnections = 10
+        minConnections = 1,
+        maxConnections = 4
     )
 
     private val json = Json {
@@ -34,60 +33,70 @@ class DatabaseService(
     }
 
     init {
-        // Initialize schema
         pool.withConnection { conn ->
             Schema.initialize(conn)
         }
-        logging.logToOutput("Database initialized at $dbPath (schema v${Schema.CURRENT_VERSION})")
+        logging.logToOutput("Database schema v${Schema.CURRENT_VERSION} ready at ${dbPath.toAbsolutePath()}")
     }
 
     // ============== Traffic Operations ==============
 
-    /**
-     * Insert a new traffic item. Returns the generated ID.
-     */
     fun insertTraffic(item: TrafficItem): Long {
         return pool.withTransaction { conn ->
             insertTrafficInternal(conn, item)
         }
     }
 
-    /**
-     * Insert a batch of traffic items efficiently.
-     */
     fun insertTrafficBatch(items: List<TrafficItem>): List<Long> {
         if (items.isEmpty()) return emptyList()
 
         return pool.withTransaction { conn ->
             items.map { insertTrafficInternal(conn, it) }
-        }
+        }.filter { it >= 0 }  // Exclude skipped duplicates
     }
 
     private fun insertTrafficInternal(conn: Connection, item: TrafficItem): Long {
-        // 1. Insert main record
+        // 1. Insert main record into http_traffic (OR IGNORE to skip duplicate request_hash)
         val trafficId = conn.prepareStatement(
             """
-            INSERT INTO traffic (timestamp, tool_source, method, url, host, port,
-                                is_https, status_code, content_length, content_type,
-                                request_hash, session_tag, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO http_traffic (
+                timestamp, tool, method, host, path, query, param_count,
+                status_code, response_length, request_time, comment, protocol,
+                port, url, ip_address, param_names, mime_type, extension,
+                page_title, response_time, connection_id, content_type,
+                request_hash, session_tag, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             Statement.RETURN_GENERATED_KEYS
         ).use { stmt ->
-            stmt.setLong(1, item.timestamp)
-            stmt.setString(2, item.toolSource)
+            stmt.setString(1, item.timestamp)
+            stmt.setString(2, item.tool)
             stmt.setString(3, item.method)
-            stmt.setString(4, item.url)
-            stmt.setString(5, item.host)
-            stmt.setInt(6, item.port)
-            stmt.setInt(7, if (item.isHttps) 1 else 0)
-            stmt.setObject(8, item.statusCode)
-            stmt.setObject(9, item.contentLength)
-            stmt.setString(10, item.contentType)
-            stmt.setString(11, item.requestHash)
-            stmt.setString(12, item.sessionTag)
-            stmt.setString(13, item.notes)
-            stmt.executeUpdate()
+            stmt.setString(4, item.host)
+            setNullableString(stmt, 5, item.path)
+            setNullableString(stmt, 6, item.query)
+            setNullableInt(stmt, 7, item.paramCount)
+            setNullableInt(stmt, 8, item.statusCode)
+            setNullableInt(stmt, 9, item.responseLength)
+            setNullableString(stmt, 10, item.requestTime)
+            setNullableString(stmt, 11, item.comment)
+            stmt.setString(12, item.protocol)
+            stmt.setInt(13, item.port)
+            stmt.setString(14, item.url)
+            setNullableString(stmt, 15, item.ipAddress)
+            setNullableString(stmt, 16, item.paramNames)
+            setNullableString(stmt, 17, item.mimeType)
+            setNullableString(stmt, 18, item.extension)
+            setNullableString(stmt, 19, item.pageTitle)
+            setNullableString(stmt, 20, item.responseTime)
+            setNullableString(stmt, 21, item.connectionId)
+            setNullableString(stmt, 22, item.contentType)
+            setNullableString(stmt, 23, item.requestHash)
+            setNullableString(stmt, 24, item.sessionTag)
+            setNullableString(stmt, 25, item.notes)
+            val rowsInserted = stmt.executeUpdate()
+
+            if (rowsInserted == 0) return -1  // Duplicate request_hash, skip messages + FTS
 
             stmt.generatedKeys.use { rs ->
                 if (rs.next()) rs.getLong(1)
@@ -95,29 +104,19 @@ class DatabaseService(
             }
         }
 
-        // 2. Insert request data
+        // 2. Insert messages into http_messages
         conn.prepareStatement(
-            "INSERT INTO traffic_request_data (traffic_id, headers, body) VALUES (?, ?, ?)"
+            "INSERT INTO http_messages (request_id, request_headers, request_body, response_headers, response_body) VALUES (?, ?, ?, ?, ?)"
         ).use { stmt ->
             stmt.setLong(1, trafficId)
-            stmt.setString(2, item.requestHeaders)
-            stmt.setBytes(3, item.requestBody)
+            setNullableString(stmt, 2, item.requestHeaders)
+            setNullableBytes(stmt, 3, item.requestBody)
+            setNullableString(stmt, 4, item.responseHeaders)
+            setNullableBytes(stmt, 5, item.responseBody)
             stmt.executeUpdate()
         }
 
-        // 3. Insert response data if present
-        if (item.responseHeaders != null || item.responseBody != null) {
-            conn.prepareStatement(
-                "INSERT INTO traffic_response_data (traffic_id, headers, body) VALUES (?, ?, ?)"
-            ).use { stmt ->
-                stmt.setLong(1, trafficId)
-                stmt.setString(2, item.responseHeaders)
-                stmt.setBytes(3, item.responseBody)
-                stmt.executeUpdate()
-            }
-        }
-
-        // 4. Update FTS index
+        // 3. Update FTS index (cap text size to avoid indexing huge binary blobs)
         conn.prepareStatement(
             """
             INSERT INTO traffic_fts (rowid, url, request_headers, request_body, response_headers, response_body)
@@ -126,74 +125,33 @@ class DatabaseService(
         ).use { stmt ->
             stmt.setLong(1, trafficId)
             stmt.setString(2, item.url)
-            stmt.setString(3, item.requestHeaders)
-            stmt.setString(4, item.requestBody?.toString(Charsets.UTF_8) ?: "")
+            stmt.setString(3, item.requestHeaders ?: "")
+            stmt.setString(4, truncateForFts(item.requestBody))
             stmt.setString(5, item.responseHeaders ?: "")
-            stmt.setString(6, item.responseBody?.toString(Charsets.UTF_8) ?: "")
+            stmt.setString(6, truncateForFts(item.responseBody))
             stmt.executeUpdate()
         }
 
         return trafficId
     }
 
-    /**
-     * Update a traffic item with response data.
-     */
-    fun updateTrafficResponse(requestHash: String, statusCode: Int, headers: String, body: ByteArray?) {
-        pool.withTransaction { conn ->
-            // Get the traffic ID by hash
-            val trafficId = conn.prepareStatement(
-                "SELECT id FROM traffic WHERE request_hash = ?"
-            ).use { stmt ->
-                stmt.setString(1, requestHash)
-                stmt.executeQuery().use { rs ->
-                    if (rs.next()) rs.getLong(1) else return@withTransaction
-                }
-            }
+    private fun setNullableString(stmt: PreparedStatement, index: Int, value: String?) {
+        if (value != null) stmt.setString(index, value)
+        else stmt.setNull(index, java.sql.Types.VARCHAR)
+    }
 
-            // Update main record
-            conn.prepareStatement(
-                "UPDATE traffic SET status_code = ?, content_length = ? WHERE id = ?"
-            ).use { stmt ->
-                stmt.setInt(1, statusCode)
-                stmt.setObject(2, body?.size)
-                stmt.setLong(3, trafficId)
-                stmt.executeUpdate()
-            }
+    private fun setNullableInt(stmt: PreparedStatement, index: Int, value: Int?) {
+        if (value != null) stmt.setInt(index, value)
+        else stmt.setNull(index, java.sql.Types.INTEGER)
+    }
 
-            // Insert or update response data
-            conn.prepareStatement(
-                """
-                INSERT INTO traffic_response_data (traffic_id, headers, body)
-                VALUES (?, ?, ?)
-                ON CONFLICT(traffic_id) DO UPDATE SET headers = excluded.headers, body = excluded.body
-                """.trimIndent()
-            ).use { stmt ->
-                stmt.setLong(1, trafficId)
-                stmt.setString(2, headers)
-                stmt.setBytes(3, body)
-                stmt.executeUpdate()
-            }
-
-            // Update FTS
-            conn.prepareStatement(
-                """
-                UPDATE traffic_fts SET response_headers = ?, response_body = ? WHERE rowid = ?
-                """.trimIndent()
-            ).use { stmt ->
-                stmt.setString(1, headers)
-                stmt.setString(2, body?.toString(Charsets.UTF_8) ?: "")
-                stmt.setLong(3, trafficId)
-                stmt.executeUpdate()
-            }
-        }
+    private fun setNullableBytes(stmt: PreparedStatement, index: Int, value: ByteArray?) {
+        if (value != null) stmt.setBytes(index, value)
+        else stmt.setNull(index, java.sql.Types.BLOB)
     }
 
     // ============== Search Operations ==============
 
-    /**
-     * Full-text search using FTS5.
-     */
     fun searchTraffic(
         query: String,
         method: String? = null,
@@ -207,9 +165,8 @@ class DatabaseService(
             val conditions = mutableListOf<String>()
             val params = mutableListOf<Any>()
 
-            // FTS5 query
             if (query.isNotBlank()) {
-                conditions.add("t.id IN (SELECT rowid FROM traffic_fts WHERE traffic_fts MATCH ?)")
+                conditions.add("t.request_id IN (SELECT rowid FROM traffic_fts WHERE traffic_fts MATCH ?)")
                 params.add(query)
             }
 
@@ -229,7 +186,7 @@ class DatabaseService(
             }
 
             if (toolSource != null) {
-                conditions.add("t.tool_source = ?")
+                conditions.add("t.tool = ?")
                 params.add(toolSource)
             }
 
@@ -238,9 +195,10 @@ class DatabaseService(
             } else ""
 
             val sql = """
-                SELECT t.id, t.timestamp, t.tool_source, t.method, t.url, t.host, t.port,
-                       t.is_https, t.status_code, t.content_length, t.content_type, t.session_tag
-                FROM traffic t
+                SELECT t.request_id, t.timestamp, t.tool, t.method, t.url, t.host, t.port,
+                       t.protocol, t.status_code, t.response_length, t.content_type, t.session_tag,
+                       t.mime_type, t.path, t.extension, t.page_title
+                FROM http_traffic t
                 $whereClause
                 ORDER BY t.timestamp DESC
                 LIMIT ? OFFSET ?
@@ -263,16 +221,16 @@ class DatabaseService(
                     while (rs.next()) {
                         results.add(
                             TrafficSearchResult(
-                                id = rs.getLong("id"),
-                                timestamp = rs.getLong("timestamp"),
-                                toolSource = rs.getString("tool_source"),
+                                id = rs.getLong("request_id"),
+                                timestamp = rs.getString("timestamp"),
+                                toolSource = rs.getString("tool"),
                                 method = rs.getString("method"),
                                 url = rs.getString("url"),
                                 host = rs.getString("host"),
                                 port = rs.getInt("port"),
-                                isHttps = rs.getInt("is_https") == 1,
+                                isHttps = rs.getString("protocol") == "HTTPS",
                                 statusCode = rs.getObject("status_code") as? Int,
-                                contentLength = rs.getObject("content_length") as? Int,
+                                contentLength = rs.getObject("response_length") as? Int,
                                 contentType = rs.getString("content_type"),
                                 sessionTag = rs.getString("session_tag")
                             )
@@ -284,48 +242,44 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Search using regex pattern.
-     */
     fun searchTrafficRegex(
         pattern: String,
         searchIn: SearchField = SearchField.RESPONSE_BODY,
-        limit: Int = 100
-    ): List<TrafficSearchResult> {
+        limit: Int = 100,
+        host: String? = null
+    ): TrafficRegexSearchResponse {
         val compiledPattern = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE)
 
         return pool.withConnection { conn ->
-            val (table, column) = when (searchIn) {
-                SearchField.URL -> "traffic" to "url"
-                SearchField.REQUEST_HEADERS -> "traffic_request_data" to "headers"
-                SearchField.REQUEST_BODY -> "traffic_request_data" to "body"
-                SearchField.RESPONSE_HEADERS -> "traffic_response_data" to "headers"
-                SearchField.RESPONSE_BODY -> "traffic_response_data" to "body"
+            val (joinClause, column) = when (searchIn) {
+                SearchField.URL -> "" to "t.url"
+                SearchField.REQUEST_HEADERS -> "LEFT JOIN http_messages m ON t.request_id = m.request_id" to "m.request_headers"
+                SearchField.REQUEST_BODY -> "LEFT JOIN http_messages m ON t.request_id = m.request_id" to "m.request_body"
+                SearchField.RESPONSE_HEADERS -> "LEFT JOIN http_messages m ON t.request_id = m.request_id" to "m.response_headers"
+                SearchField.RESPONSE_BODY -> "LEFT JOIN http_messages m ON t.request_id = m.request_id" to "m.response_body"
             }
 
-            val sql = if (table == "traffic") {
-                """
-                SELECT t.id, t.timestamp, t.tool_source, t.method, t.url, t.host, t.port,
-                       t.is_https, t.status_code, t.content_length, t.content_type, t.session_tag,
-                       t.$column as search_content
-                FROM traffic t
+            val hostFilter = if (host != null) "WHERE t.host LIKE ?" else ""
+
+            val sql = """
+                SELECT t.request_id, t.timestamp, t.tool, t.method, t.url, t.host, t.port,
+                       t.protocol, t.status_code, t.response_length, t.content_type, t.session_tag,
+                       $column as search_content
+                FROM http_traffic t
+                $joinClause
+                $hostFilter
                 ORDER BY t.timestamp DESC
-                """.trimIndent()
-            } else {
-                """
-                SELECT t.id, t.timestamp, t.tool_source, t.method, t.url, t.host, t.port,
-                       t.is_https, t.status_code, t.content_length, t.content_type, t.session_tag,
-                       d.$column as search_content
-                FROM traffic t
-                LEFT JOIN $table d ON t.id = d.traffic_id
-                ORDER BY t.timestamp DESC
-                """.trimIndent()
-            }
+                LIMIT $MAX_SCAN_ROWS
+            """.trimIndent()
 
             conn.prepareStatement(sql).use { stmt ->
+                if (host != null) stmt.setString(1, "%$host%")
+
                 stmt.executeQuery().use { rs ->
                     val results = mutableListOf<TrafficSearchResult>()
+                    var scannedRows = 0
                     while (rs.next() && results.size < limit) {
+                        scannedRows++
                         val content = when (val raw = rs.getObject("search_content")) {
                             is ByteArray -> String(raw, Charsets.UTF_8)
                             is String -> raw
@@ -335,61 +289,68 @@ class DatabaseService(
                         if (compiledPattern.matcher(content).find()) {
                             results.add(
                                 TrafficSearchResult(
-                                    id = rs.getLong("id"),
-                                    timestamp = rs.getLong("timestamp"),
-                                    toolSource = rs.getString("tool_source"),
+                                    id = rs.getLong("request_id"),
+                                    timestamp = rs.getString("timestamp"),
+                                    toolSource = rs.getString("tool"),
                                     method = rs.getString("method"),
                                     url = rs.getString("url"),
                                     host = rs.getString("host"),
                                     port = rs.getInt("port"),
-                                    isHttps = rs.getInt("is_https") == 1,
+                                    isHttps = rs.getString("protocol") == "HTTPS",
                                     statusCode = rs.getObject("status_code") as? Int,
-                                    contentLength = rs.getObject("content_length") as? Int,
+                                    contentLength = rs.getObject("response_length") as? Int,
                                     contentType = rs.getString("content_type"),
                                     sessionTag = rs.getString("session_tag")
                                 )
                             )
                         }
                     }
-                    results
+                    TrafficRegexSearchResponse(
+                        results = results,
+                        scannedRows = scannedRows,
+                        scanLimitReached = scannedRows >= MAX_SCAN_ROWS && results.size < limit
+                    )
                 }
             }
         }
     }
 
-    /**
-     * Get a specific traffic item by ID with full data.
-     */
     fun getTrafficById(id: Long): TrafficDetail? {
         return pool.withConnection { conn ->
             conn.prepareStatement(
                 """
                 SELECT t.*,
-                       req.headers as request_headers, req.body as request_body,
-                       res.headers as response_headers, res.body as response_body
-                FROM traffic t
-                LEFT JOIN traffic_request_data req ON t.id = req.traffic_id
-                LEFT JOIN traffic_response_data res ON t.id = res.traffic_id
-                WHERE t.id = ?
+                       m.request_headers, m.request_body,
+                       m.response_headers, m.response_body
+                FROM http_traffic t
+                LEFT JOIN http_messages m ON t.request_id = m.request_id
+                WHERE t.request_id = ?
                 """.trimIndent()
             ).use { stmt ->
                 stmt.setLong(1, id)
                 stmt.executeQuery().use { rs ->
                     if (rs.next()) {
                         TrafficDetail(
-                            id = rs.getLong("id"),
-                            timestamp = rs.getLong("timestamp"),
-                            toolSource = rs.getString("tool_source"),
+                            id = rs.getLong("request_id"),
+                            timestamp = rs.getString("timestamp"),
+                            toolSource = rs.getString("tool"),
                             method = rs.getString("method"),
                             url = rs.getString("url"),
                             host = rs.getString("host"),
                             port = rs.getInt("port"),
-                            isHttps = rs.getInt("is_https") == 1,
+                            isHttps = rs.getString("protocol") == "HTTPS",
                             statusCode = rs.getObject("status_code") as? Int,
-                            contentLength = rs.getObject("content_length") as? Int,
+                            contentLength = rs.getObject("response_length") as? Int,
                             contentType = rs.getString("content_type"),
                             sessionTag = rs.getString("session_tag"),
                             notes = rs.getString("notes"),
+                            path = rs.getString("path"),
+                            query = rs.getString("query"),
+                            mimeType = rs.getString("mime_type"),
+                            extension = rs.getString("extension"),
+                            pageTitle = rs.getString("page_title"),
+                            ipAddress = rs.getString("ip_address"),
+                            paramNames = rs.getString("param_names"),
                             requestHeaders = rs.getString("request_headers"),
                             requestBody = rs.getBytes("request_body"),
                             responseHeaders = rs.getString("response_headers"),
@@ -401,19 +362,16 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Get traffic statistics.
-     */
     fun getStats(): TrafficStats {
         return pool.withConnection { conn ->
             conn.createStatement().use { stmt ->
-                val totalCount = stmt.executeQuery("SELECT COUNT(*) FROM traffic").use { rs ->
+                val totalCount = stmt.executeQuery("SELECT COUNT(*) FROM http_traffic").use { rs ->
                     if (rs.next()) rs.getLong(1) else 0
                 }
 
                 val hostCounts = mutableMapOf<String, Long>()
                 stmt.executeQuery(
-                    "SELECT host, COUNT(*) as cnt FROM traffic GROUP BY host ORDER BY cnt DESC LIMIT 10"
+                    "SELECT host, COUNT(*) as cnt FROM http_traffic GROUP BY host ORDER BY cnt DESC LIMIT 10"
                 ).use { rs ->
                     while (rs.next()) {
                         hostCounts[rs.getString("host")] = rs.getLong("cnt")
@@ -422,7 +380,7 @@ class DatabaseService(
 
                 val methodCounts = mutableMapOf<String, Long>()
                 stmt.executeQuery(
-                    "SELECT method, COUNT(*) as cnt FROM traffic GROUP BY method"
+                    "SELECT method, COUNT(*) as cnt FROM http_traffic GROUP BY method"
                 ).use { rs ->
                     while (rs.next()) {
                         methodCounts[rs.getString("method")] = rs.getLong("cnt")
@@ -431,7 +389,7 @@ class DatabaseService(
 
                 val statusCounts = mutableMapOf<Int, Long>()
                 stmt.executeQuery(
-                    "SELECT status_code, COUNT(*) as cnt FROM traffic WHERE status_code IS NOT NULL GROUP BY status_code"
+                    "SELECT status_code, COUNT(*) as cnt FROM http_traffic WHERE status_code IS NOT NULL GROUP BY status_code"
                 ).use { rs ->
                     while (rs.next()) {
                         statusCounts[rs.getInt("status_code")] = rs.getLong("cnt")
@@ -451,16 +409,13 @@ class DatabaseService(
 
     // ============== Traffic Analysis Operations ==============
 
-    /**
-     * Get unique endpoints (URL paths) by host.
-     */
     fun getEndpoints(host: String? = null, limit: Int = 500): List<EndpointInfo> {
         return pool.withConnection { conn ->
             val sql = if (host != null) {
                 """
                 SELECT host, url, method, COUNT(*) as request_count,
                        MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
-                FROM traffic
+                FROM http_traffic
                 WHERE host LIKE ?
                 GROUP BY host, url, method
                 ORDER BY request_count DESC
@@ -470,7 +425,7 @@ class DatabaseService(
                 """
                 SELECT host, url, method, COUNT(*) as request_count,
                        MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
-                FROM traffic
+                FROM http_traffic
                 GROUP BY host, url, method
                 ORDER BY request_count DESC
                 LIMIT ?
@@ -491,8 +446,8 @@ class DatabaseService(
                                 url = rs.getString("url"),
                                 method = rs.getString("method"),
                                 requestCount = rs.getLong("request_count"),
-                                firstSeen = rs.getLong("first_seen"),
-                                lastSeen = rs.getLong("last_seen")
+                                firstSeen = rs.getString("first_seen"),
+                                lastSeen = rs.getString("last_seen")
                             )
                         )
                     }
@@ -502,29 +457,20 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Extract unique parameters from query strings and request bodies.
-     */
     fun getParameters(host: String? = null, limit: Int = 500): List<ParameterInfo> {
         return pool.withConnection { conn ->
-            val sql = if (host != null) {
-                """
-                SELECT t.host, t.url, req.body
-                FROM traffic t
-                LEFT JOIN traffic_request_data req ON t.id = req.traffic_id
-                WHERE t.host LIKE ?
+            // Use the pre-extracted param_names column instead of loading request bodies.
+            // FieldExtractor stores comma-separated param names during traffic capture.
+            val hostFilter = if (host != null) "WHERE t.host LIKE ? AND t.param_names IS NOT NULL"
+                else "WHERE t.param_names IS NOT NULL"
+
+            val sql = """
+                SELECT t.host, t.url, t.param_names
+                FROM http_traffic t
+                $hostFilter
                 ORDER BY t.timestamp DESC
-                LIMIT 10000
-                """.trimIndent()
-            } else {
-                """
-                SELECT t.host, t.url, req.body
-                FROM traffic t
-                LEFT JOIN traffic_request_data req ON t.id = req.traffic_id
-                ORDER BY t.timestamp DESC
-                LIMIT 10000
-                """.trimIndent()
-            }
+                LIMIT 50000
+            """.trimIndent()
 
             conn.prepareStatement(sql).use { stmt ->
                 if (host != null) stmt.setString(1, "%$host%")
@@ -535,18 +481,18 @@ class DatabaseService(
                     while (rs.next()) {
                         val hostName = rs.getString("host")
                         val url = rs.getString("url")
-                        val body = rs.getBytes("body")
+                        val paramNames = rs.getString("param_names")
 
-                        // Extract query params from URL
+                        // Query params from URL
                         extractQueryParams(url).forEach { param ->
                             val key = Triple(hostName, param, "query")
                             paramMap[key] = paramMap.getOrDefault(key, 0) + 1
                         }
 
-                        // Extract body params (form data)
-                        if (body != null) {
-                            extractBodyParams(String(body, Charsets.UTF_8)).forEach { param ->
-                                val key = Triple(hostName, param, "body")
+                        // Stored param names (from Burp's parameter parser — includes body params)
+                        if (!paramNames.isNullOrBlank()) {
+                            paramNames.split(",").filter { it.isNotBlank() }.forEach { param ->
+                                val key = Triple(hostName, param.trim(), "parsed")
                                 paramMap[key] = paramMap.getOrDefault(key, 0) + 1
                             }
                         }
@@ -578,34 +524,12 @@ class DatabaseService(
             .distinct()
     }
 
-    private fun extractBodyParams(body: String): List<String> {
-        // Handle URL-encoded form data
-        if (body.contains('=')) {
-            return body.split('&')
-                .mapNotNull { it.split('=').firstOrNull()?.takeIf { p -> p.isNotBlank() } }
-                .distinct()
-        }
-        // Handle JSON (extract top-level keys)
-        if (body.trimStart().startsWith('{')) {
-            return try {
-                val jsonRegex = """"([^"]+)":\s*""".toRegex()
-                jsonRegex.findAll(body).map { it.groupValues[1] }.toList().distinct()
-            } catch (e: Exception) {
-                emptyList()
-            }
-        }
-        return emptyList()
-    }
-
-    /**
-     * Get response type distribution.
-     */
     fun getResponseTypes(host: String? = null): List<ResponseTypeInfo> {
         return pool.withConnection { conn ->
             val sql = if (host != null) {
                 """
                 SELECT content_type, COUNT(*) as count
-                FROM traffic
+                FROM http_traffic
                 WHERE host LIKE ? AND content_type IS NOT NULL
                 GROUP BY content_type
                 ORDER BY count DESC
@@ -613,7 +537,7 @@ class DatabaseService(
             } else {
                 """
                 SELECT content_type, COUNT(*) as count
-                FROM traffic
+                FROM http_traffic
                 WHERE content_type IS NOT NULL
                 GROUP BY content_type
                 ORDER BY count DESC
@@ -639,15 +563,12 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Get status code distribution.
-     */
     fun getStatusDistribution(host: String? = null): List<StatusDistributionInfo> {
         return pool.withConnection { conn ->
             val sql = if (host != null) {
                 """
                 SELECT status_code, COUNT(*) as count
-                FROM traffic
+                FROM http_traffic
                 WHERE host LIKE ? AND status_code IS NOT NULL
                 GROUP BY status_code
                 ORDER BY status_code
@@ -655,7 +576,7 @@ class DatabaseService(
             } else {
                 """
                 SELECT status_code, COUNT(*) as count
-                FROM traffic
+                FROM http_traffic
                 WHERE status_code IS NOT NULL
                 GROUP BY status_code
                 ORDER BY status_code
@@ -683,14 +604,11 @@ class DatabaseService(
 
     // ============== Traffic Tagging Operations ==============
 
-    /**
-     * Add a tag to a traffic item.
-     */
     fun tagTraffic(trafficId: Long, tag: String, note: String? = null): Long {
         return pool.withConnection { conn ->
             conn.prepareStatement(
                 "INSERT INTO traffic_tags (traffic_id, tag, note) VALUES (?, ?, ?)",
-                java.sql.Statement.RETURN_GENERATED_KEYS
+                Statement.RETURN_GENERATED_KEYS
             ).use { stmt ->
                 stmt.setLong(1, trafficId)
                 stmt.setString(2, tag)
@@ -705,17 +623,14 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Get traffic items by tag.
-     */
     fun getTaggedTraffic(tag: String, limit: Int = 100): List<TaggedTrafficResult> {
         return pool.withConnection { conn ->
             conn.prepareStatement(
                 """
-                SELECT t.id, t.timestamp, t.method, t.url, t.host, t.port, t.status_code,
+                SELECT t.request_id, t.timestamp, t.method, t.url, t.host, t.port, t.status_code,
                        tt.tag, tt.note, tt.created_at as tag_created_at
-                FROM traffic t
-                JOIN traffic_tags tt ON t.id = tt.traffic_id
+                FROM http_traffic t
+                JOIN traffic_tags tt ON t.request_id = tt.traffic_id
                 WHERE tt.tag = ?
                 ORDER BY t.timestamp DESC
                 LIMIT ?
@@ -729,8 +644,8 @@ class DatabaseService(
                     while (rs.next()) {
                         results.add(
                             TaggedTrafficResult(
-                                trafficId = rs.getLong("id"),
-                                timestamp = rs.getLong("timestamp"),
+                                trafficId = rs.getLong("request_id"),
+                                timestamp = rs.getString("timestamp"),
                                 method = rs.getString("method"),
                                 url = rs.getString("url"),
                                 host = rs.getString("host"),
@@ -748,9 +663,6 @@ class DatabaseService(
         }
     }
 
-    /**
-     * List all unique tags.
-     */
     fun listTags(): List<TagSummary> {
         return pool.withConnection { conn ->
             conn.createStatement().use { stmt ->
@@ -778,9 +690,6 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Delete a tag from a traffic item.
-     */
     fun deleteTrafficTag(trafficId: Long, tag: String): Boolean {
         return pool.withConnection { conn ->
             conn.prepareStatement("DELETE FROM traffic_tags WHERE traffic_id = ? AND tag = ?").use { stmt ->
@@ -791,18 +700,15 @@ class DatabaseService(
         }
     }
 
-    /**
-     * Generate wordlist from traffic (paths, params, etc).
-     */
     fun generateWordlist(host: String? = null, includeParams: Boolean = true, includePaths: Boolean = true): List<String> {
         val words = mutableSetOf<String>()
 
         pool.withConnection { conn ->
             if (includePaths) {
                 val sql = if (host != null) {
-                    "SELECT DISTINCT url FROM traffic WHERE host LIKE ?"
+                    "SELECT DISTINCT url FROM http_traffic WHERE host LIKE ?"
                 } else {
-                    "SELECT DISTINCT url FROM traffic"
+                    "SELECT DISTINCT url FROM http_traffic"
                 }
 
                 conn.prepareStatement(sql).use { stmt ->
@@ -811,7 +717,6 @@ class DatabaseService(
                     stmt.executeQuery().use { rs ->
                         while (rs.next()) {
                             val url = rs.getString("url")
-                            // Extract path segments
                             val path = url.substringBefore('?').substringBefore('#')
                             path.split('/').filter { it.isNotBlank() }.forEach { words.add(it) }
                         }
@@ -820,20 +725,12 @@ class DatabaseService(
             }
 
             if (includeParams) {
-                val sql = if (host != null) {
-                    """
-                    SELECT t.url, req.body
-                    FROM traffic t
-                    LEFT JOIN traffic_request_data req ON t.id = req.traffic_id
-                    WHERE t.host LIKE ?
-                    """.trimIndent()
-                } else {
-                    """
-                    SELECT t.url, req.body
-                    FROM traffic t
-                    LEFT JOIN traffic_request_data req ON t.id = req.traffic_id
-                    """.trimIndent()
-                }
+                val hostFilter = if (host != null) "WHERE host LIKE ?" else ""
+                val sql = """
+                    SELECT url, param_names
+                    FROM http_traffic
+                    $hostFilter
+                """.trimIndent()
 
                 conn.prepareStatement(sql).use { stmt ->
                     if (host != null) stmt.setString(1, "%$host%")
@@ -841,11 +738,13 @@ class DatabaseService(
                     stmt.executeQuery().use { rs ->
                         while (rs.next()) {
                             val url = rs.getString("url")
-                            val body = rs.getBytes("body")
+                            val paramNames = rs.getString("param_names")
 
                             words.addAll(extractQueryParams(url))
-                            if (body != null) {
-                                words.addAll(extractBodyParams(String(body, Charsets.UTF_8)))
+                            if (!paramNames.isNullOrBlank()) {
+                                paramNames.split(",").filter { it.isNotBlank() }.forEach {
+                                    words.add(it.trim())
+                                }
                             }
                         }
                     }
@@ -930,11 +829,194 @@ class DatabaseService(
         }
     }
 
+    // ============== Template Operations ==============
+
+    fun createTemplate(name: String, templateJson: String): Long {
+        return pool.withConnection { conn ->
+            conn.prepareStatement(
+                "INSERT OR REPLACE INTO templates (name, created_at, template_json) VALUES (?, ?, ?)",
+                Statement.RETURN_GENERATED_KEYS
+            ).use { stmt ->
+                stmt.setString(1, name)
+                stmt.setLong(2, System.currentTimeMillis())
+                stmt.setString(3, templateJson)
+                stmt.executeUpdate()
+
+                stmt.generatedKeys.use { rs ->
+                    if (rs.next()) rs.getLong(1)
+                    else throw RuntimeException("Failed to create template")
+                }
+            }
+        }
+    }
+
+    fun getTemplate(name: String): TemplateInfo? {
+        return pool.withConnection { conn ->
+            conn.prepareStatement("SELECT * FROM templates WHERE name = ?").use { stmt ->
+                stmt.setString(1, name)
+                stmt.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        TemplateInfo(
+                            id = rs.getLong("id"),
+                            name = rs.getString("name"),
+                            createdAt = rs.getLong("created_at"),
+                            templateJson = rs.getString("template_json")
+                        )
+                    } else null
+                }
+            }
+        }
+    }
+
+    fun listTemplates(): List<TemplateInfo> {
+        return pool.withConnection { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT * FROM templates ORDER BY name").use { rs ->
+                    val templates = mutableListOf<TemplateInfo>()
+                    while (rs.next()) {
+                        templates.add(
+                            TemplateInfo(
+                                id = rs.getLong("id"),
+                                name = rs.getString("name"),
+                                createdAt = rs.getLong("created_at"),
+                                templateJson = rs.getString("template_json")
+                            )
+                        )
+                    }
+                    templates
+                }
+            }
+        }
+    }
+
+    fun deleteTemplate(name: String): Boolean {
+        return pool.withConnection { conn ->
+            conn.prepareStatement("DELETE FROM templates WHERE name = ?").use { stmt ->
+                stmt.setString(1, name)
+                stmt.executeUpdate() > 0
+            }
+        }
+    }
+
+    // ============== Raw Socket Operations ==============
+
+    fun insertRawSocketTraffic(item: RawSocketItem): Long {
+        return pool.withConnection { conn ->
+            conn.prepareStatement(
+                """
+                INSERT INTO raw_socket_traffic (
+                    timestamp, tool, target_host, target_port, protocol,
+                    tls_alpn, request_bytes, response_bytes, request_preview,
+                    response_preview, bytes_sent, bytes_received, elapsed_ms,
+                    segment_count, connection_count, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                Statement.RETURN_GENERATED_KEYS
+            ).use { stmt ->
+                stmt.setString(1, item.timestamp)
+                stmt.setString(2, item.tool)
+                stmt.setString(3, item.targetHost)
+                stmt.setInt(4, item.targetPort)
+                stmt.setString(5, item.protocol)
+                setNullableString(stmt, 6, item.tlsAlpn)
+                setNullableBytes(stmt, 7, item.requestBytes)
+                setNullableBytes(stmt, 8, item.responseBytes)
+                setNullableString(stmt, 9, item.requestPreview)
+                setNullableString(stmt, 10, item.responsePreview)
+                setNullableInt(stmt, 11, item.bytesSent)
+                setNullableInt(stmt, 12, item.bytesReceived)
+                stmt.setObject(13, item.elapsedMs)
+                setNullableInt(stmt, 14, item.segmentCount)
+                setNullableInt(stmt, 15, item.connectionCount)
+                setNullableString(stmt, 16, item.notes)
+                stmt.executeUpdate()
+
+                stmt.generatedKeys.use { rs ->
+                    if (rs.next()) rs.getLong(1)
+                    else throw RuntimeException("Failed to get generated ID")
+                }
+            }
+        }
+    }
+
+    // ============== Collaborator Operations ==============
+
+    fun insertCollaboratorEvent(event: CollaboratorEvent): Long {
+        return pool.withConnection { conn ->
+            conn.prepareStatement(
+                """
+                INSERT INTO collaborator_events (
+                    timestamp, event_type, client_id, payload_url, custom_data,
+                    interaction_type, interaction_id, dns_query, dns_query_type,
+                    http_protocol, smtp_protocol, server_address, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                Statement.RETURN_GENERATED_KEYS
+            ).use { stmt ->
+                stmt.setString(1, event.timestamp)
+                stmt.setString(2, event.eventType)
+                setNullableString(stmt, 3, event.clientId)
+                setNullableString(stmt, 4, event.payloadUrl)
+                setNullableString(stmt, 5, event.customData)
+                setNullableString(stmt, 6, event.interactionType)
+                setNullableString(stmt, 7, event.interactionId)
+                setNullableString(stmt, 8, event.dnsQuery)
+                setNullableString(stmt, 9, event.dnsQueryType)
+                setNullableString(stmt, 10, event.httpProtocol)
+                setNullableString(stmt, 11, event.smtpProtocol)
+                setNullableString(stmt, 12, event.serverAddress)
+                setNullableString(stmt, 13, event.notes)
+                stmt.executeUpdate()
+
+                stmt.generatedKeys.use { rs ->
+                    if (rs.next()) rs.getLong(1)
+                    else throw RuntimeException("Failed to get generated ID")
+                }
+            }
+        }
+    }
+
+    fun insertCollaboratorEventBatch(events: List<CollaboratorEvent>) {
+        if (events.isEmpty()) return
+        pool.withTransaction { conn ->
+            events.forEach { event ->
+                conn.prepareStatement(
+                    """
+                    INSERT INTO collaborator_events (
+                        timestamp, event_type, client_id, payload_url, custom_data,
+                        interaction_type, interaction_id, dns_query, dns_query_type,
+                        http_protocol, smtp_protocol, server_address, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """.trimIndent()
+                ).use { stmt ->
+                    stmt.setString(1, event.timestamp)
+                    stmt.setString(2, event.eventType)
+                    setNullableString(stmt, 3, event.clientId)
+                    setNullableString(stmt, 4, event.payloadUrl)
+                    setNullableString(stmt, 5, event.customData)
+                    setNullableString(stmt, 6, event.interactionType)
+                    setNullableString(stmt, 7, event.interactionId)
+                    setNullableString(stmt, 8, event.dnsQuery)
+                    setNullableString(stmt, 9, event.dnsQueryType)
+                    setNullableString(stmt, 10, event.httpProtocol)
+                    setNullableString(stmt, 11, event.smtpProtocol)
+                    setNullableString(stmt, 12, event.serverAddress)
+                    setNullableString(stmt, 13, event.notes)
+                    stmt.executeUpdate()
+                }
+            }
+        }
+    }
+
     // ============== Utilities ==============
 
-    /**
-     * Calculate a hash for request deduplication.
-     */
+    private fun truncateForFts(body: ByteArray?): String {
+        if (body == null || body.isEmpty()) return ""
+        // Only index first 50KB of text for FTS — skip huge binary blobs
+        val maxLen = minOf(body.size, 50_000)
+        return String(body, 0, maxLen, Charsets.UTF_8)
+    }
+
     fun calculateRequestHash(method: String, url: String, body: ByteArray?): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(method.toByteArray())
@@ -947,25 +1029,43 @@ class DatabaseService(
         pool.close()
         logging.logToOutput("Database service closed")
     }
+
+    companion object {
+        // Cap rows scanned during in-memory regex filtering to prevent OOM in large projects.
+        // At 200-500k total rows, this bounds heap usage to ~100MB worst-case (50k × ~2KB avg body).
+        private const val MAX_SCAN_ROWS = 50_000
+    }
 }
 
 // ============== Data Classes ==============
 
 data class TrafficItem(
-    val timestamp: Long,
-    val toolSource: String,
+    val timestamp: String,
+    val tool: String,
     val method: String,
-    val url: String,
     val host: String,
-    val port: Int,
-    val isHttps: Boolean,
+    val path: String? = null,
+    val query: String? = null,
+    val paramCount: Int? = null,
     val statusCode: Int? = null,
-    val contentLength: Int? = null,
+    val responseLength: Int? = null,
+    val requestTime: String? = null,
+    val comment: String? = null,
+    val protocol: String,
+    val port: Int,
+    val url: String,
+    val ipAddress: String? = null,
+    val paramNames: String? = null,
+    val mimeType: String? = null,
+    val extension: String? = null,
+    val pageTitle: String? = null,
+    val responseTime: String? = null,
+    val connectionId: String? = null,
     val contentType: String? = null,
     val requestHash: String? = null,
     val sessionTag: String? = null,
     val notes: String? = null,
-    val requestHeaders: String,
+    val requestHeaders: String? = null,
     val requestBody: ByteArray? = null,
     val responseHeaders: String? = null,
     val responseBody: ByteArray? = null
@@ -974,7 +1074,7 @@ data class TrafficItem(
 @Serializable
 data class TrafficSearchResult(
     val id: Long,
-    val timestamp: Long,
+    val timestamp: String,
     val toolSource: String,
     val method: String,
     val url: String,
@@ -987,9 +1087,15 @@ data class TrafficSearchResult(
     val sessionTag: String? = null
 )
 
+data class TrafficRegexSearchResponse(
+    val results: List<TrafficSearchResult>,
+    val scannedRows: Int,
+    val scanLimitReached: Boolean
+)
+
 data class TrafficDetail(
     val id: Long,
-    val timestamp: Long,
+    val timestamp: String,
     val toolSource: String,
     val method: String,
     val url: String,
@@ -1001,6 +1107,13 @@ data class TrafficDetail(
     val contentType: String? = null,
     val sessionTag: String? = null,
     val notes: String? = null,
+    val path: String? = null,
+    val query: String? = null,
+    val mimeType: String? = null,
+    val extension: String? = null,
+    val pageTitle: String? = null,
+    val ipAddress: String? = null,
+    val paramNames: String? = null,
     val requestHeaders: String?,
     val requestBody: ByteArray?,
     val responseHeaders: String?,
@@ -1015,6 +1128,13 @@ data class SessionInfo(
     val cookies: Map<String, String>? = null,
     val headers: Map<String, String>? = null,
     val notes: String? = null
+)
+
+data class TemplateInfo(
+    val id: Long,
+    val name: String,
+    val createdAt: Long,
+    val templateJson: String
 )
 
 data class TrafficStats(
@@ -1033,21 +1153,19 @@ enum class SearchField {
     RESPONSE_BODY
 }
 
-// ============== Traffic Analysis Data Classes ==============
-
 data class EndpointInfo(
     val host: String,
     val url: String,
     val method: String,
     val requestCount: Long,
-    val firstSeen: Long,
-    val lastSeen: Long
+    val firstSeen: String,
+    val lastSeen: String
 )
 
 data class ParameterInfo(
     val host: String,
     val name: String,
-    val location: String, // "query" or "body"
+    val location: String,
     val occurrences: Int
 )
 
@@ -1063,7 +1181,7 @@ data class StatusDistributionInfo(
 
 data class TaggedTrafficResult(
     val trafficId: Long,
-    val timestamp: Long,
+    val timestamp: String,
     val method: String,
     val url: String,
     val host: String,
@@ -1078,4 +1196,43 @@ data class TagSummary(
     val tag: String,
     val count: Long,
     val lastUsed: Long
+)
+
+// ============== Raw Socket Data Classes ==============
+
+data class RawSocketItem(
+    val timestamp: String,
+    val tool: String,
+    val targetHost: String,
+    val targetPort: Int,
+    val protocol: String,
+    val tlsAlpn: String? = null,
+    val requestBytes: ByteArray? = null,
+    val responseBytes: ByteArray? = null,
+    val requestPreview: String? = null,
+    val responsePreview: String? = null,
+    val bytesSent: Int? = null,
+    val bytesReceived: Int? = null,
+    val elapsedMs: Long? = null,
+    val segmentCount: Int? = null,
+    val connectionCount: Int? = null,
+    val notes: String? = null
+)
+
+// ============== Collaborator Data Classes ==============
+
+data class CollaboratorEvent(
+    val timestamp: String,
+    val eventType: String,
+    val clientId: String? = null,
+    val payloadUrl: String? = null,
+    val customData: String? = null,
+    val interactionType: String? = null,
+    val interactionId: String? = null,
+    val dnsQuery: String? = null,
+    val dnsQueryType: String? = null,
+    val httpProtocol: String? = null,
+    val smtpProtocol: String? = null,
+    val serverAddress: String? = null,
+    val notes: String? = null
 )

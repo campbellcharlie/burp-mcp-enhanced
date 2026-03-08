@@ -3,185 +3,127 @@ package net.portswigger.mcp.logging
 import burp.api.montoya.logging.Logging
 import net.portswigger.mcp.database.DatabaseService
 import net.portswigger.mcp.database.TrafficItem
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
- * Non-blocking queue for traffic logging.
- *
- * CRITICAL: Burp's proxy threads must NEVER be blocked.
- * This queue uses offer() which returns immediately.
- *
- * Architecture:
- * - Burp proxy threads -> offer() to queue (non-blocking, < 1ms)
- * - Single writer thread -> drains queue in batches -> writes to SQLite
+ * Non-blocking queue for traffic logging, matching sqlitedb_burp's DatabaseWriterThread.
+ * Simple design: single item type, batch insert, daemon thread.
  */
 class TrafficQueue(
     private val db: DatabaseService,
     private val logging: Logging,
-    capacity: Int = 100_000
+    capacity: Int = QUEUE_CAPACITY
 ) : AutoCloseable {
 
-    private val queue = ArrayBlockingQueue<QueueItem>(capacity)
-    private val running = AtomicBoolean(true)
+    private val queue = LinkedBlockingQueue<TrafficItem>(capacity)
 
-    // Metrics
     private val enqueued = AtomicLong(0)
     private val dropped = AtomicLong(0)
     private val processed = AtomicLong(0)
     private val errors = AtomicLong(0)
 
+    @Volatile
+    private var running = true
+
+    // When non-null, the writer thread will drain the queue and count down the latch.
+    private val flushLatch = AtomicReference<CountDownLatch>(null)
+
     private val writerThread = thread(
         name = "mcp-traffic-writer",
         isDaemon = true,
-        priority = Thread.MIN_PRIORITY  // Low priority - don't compete with Burp
+        priority = Thread.MIN_PRIORITY
     ) {
         runWriterLoop()
     }
 
-    /**
-     * Enqueue a traffic request. Called from Burp proxy threads.
-     * MUST NOT BLOCK - returns immediately.
-     */
-    fun enqueueRequest(item: TrafficItem): Boolean {
-        val success = queue.offer(QueueItem.Request(item))
-        if (success) {
+    fun enqueue(item: TrafficItem): Boolean {
+        val offered = queue.offer(item)
+        if (offered) {
             enqueued.incrementAndGet()
         } else {
-            dropped.incrementAndGet()
-            logDroppedIfNeeded()
+            val count = dropped.incrementAndGet()
+            if (count % DROP_LOG_INTERVAL == 0L) {
+                logging.logToError("Traffic queue full - $count total records dropped")
+            }
         }
-        return success
+        return offered
     }
 
     /**
-     * Enqueue a response update. Called from Burp proxy threads.
-     * MUST NOT BLOCK - returns immediately.
+     * Block until all currently queued items are written to the database.
+     * Use before searching to ensure recently-sent traffic is available.
      */
-    fun enqueueResponseUpdate(
-        requestHash: String,
-        statusCode: Int,
-        responseHeaders: String,
-        responseBody: ByteArray?
-    ): Boolean {
-        val success = queue.offer(
-            QueueItem.ResponseUpdate(requestHash, statusCode, responseHeaders, responseBody)
-        )
-        if (success) {
-            enqueued.incrementAndGet()
-        } else {
-            dropped.incrementAndGet()
-            logDroppedIfNeeded()
-        }
-        return success
-    }
-
-    private fun logDroppedIfNeeded() {
-        val droppedCount = dropped.get()
-        if (droppedCount % 1000 == 0L) {
-            logging.logToError("Traffic queue dropped $droppedCount items (queue full)")
+    fun flush(timeoutMs: Long = FLUSH_TIMEOUT_MS): Boolean {
+        if (queue.isEmpty()) return true
+        val latch = CountDownLatch(1)
+        flushLatch.set(latch)
+        // Wake the writer if it's blocked on poll()
+        writerThread.interrupt()
+        return try {
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
         }
     }
 
     private fun runWriterLoop() {
-        val batch = mutableListOf<QueueItem>()
-
-        while (running.get() || queue.isNotEmpty()) {
+        while (running) {
             try {
-                // Block on first item (saves CPU when idle)
-                val first = queue.poll(1, java.util.concurrent.TimeUnit.SECONDS)
-                if (first == null) continue
-
-                batch.add(first)
-
-                // Drain available items up to adaptive batch size
-                val batchSize = calculateAdaptiveBatchSize()
-                queue.drainTo(batch.toMutableList().also { batch.clear(); batch.addAll(it) }, batchSize - 1)
-
-                // We need to re-add 'first' since drainTo doesn't include it
-                val actualBatch = mutableListOf(first)
-                repeat(minOf(batchSize - 1, queue.size)) {
-                    queue.poll()?.let { actualBatch.add(it) }
+                // Check for flush request
+                val pendingFlush = flushLatch.getAndSet(null)
+                if (pendingFlush != null) {
+                    drainRemaining()
+                    pendingFlush.countDown()
+                    continue
                 }
 
-                processBatch(actualBatch)
-                processed.addAndGet(actualBatch.size.toLong())
-                actualBatch.clear()
-
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                break
-            } catch (e: Exception) {
-                errors.incrementAndGet()
-                logging.logToError("Traffic write error: ${e.message}")
-                // Back off on error
-                Thread.sleep(100)
+                val record = queue.poll(POLL_TIMEOUT_SECONDS, TimeUnit.SECONDS) ?: continue
+                val batch = mutableListOf(record)
+                queue.drainTo(batch, BATCH_SIZE - 1)
+                flushBatch(batch)
+            } catch (_: InterruptedException) {
+                // Could be a flush wake-up or a shutdown — check both
+                if (!running) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+                // Clear interrupt flag and check for flush
+                val pendingFlush = flushLatch.getAndSet(null)
+                if (pendingFlush != null) {
+                    drainRemaining()
+                    pendingFlush.countDown()
+                }
             }
         }
-
-        // Drain remaining items on shutdown
         drainRemaining()
     }
 
-    private fun processBatch(batch: List<QueueItem>) {
+    private fun flushBatch(batch: List<TrafficItem>) {
         if (batch.isEmpty()) return
-
-        // Separate requests and updates
-        val requests = batch.filterIsInstance<QueueItem.Request>()
-        val updates = batch.filterIsInstance<QueueItem.ResponseUpdate>()
-
-        // Batch insert requests
-        if (requests.isNotEmpty()) {
-            try {
-                db.insertTrafficBatch(requests.map { it.item })
-            } catch (e: Exception) {
-                logging.logToError("Failed to insert traffic batch: ${e.message}")
-                errors.addAndGet(requests.size.toLong())
-            }
-        }
-
-        // Process response updates
-        updates.forEach { update ->
-            try {
-                db.updateTrafficResponse(
-                    requestHash = update.requestHash,
-                    statusCode = update.statusCode,
-                    headers = update.responseHeaders,
-                    body = update.responseBody
-                )
-            } catch (e: Exception) {
-                logging.logToError("Failed to update response: ${e.message}")
-                errors.incrementAndGet()
-            }
-        }
-    }
-
-    private fun calculateAdaptiveBatchSize(): Int {
-        val queueSize = queue.size
-        return when {
-            queueSize < 10 -> 10
-            queueSize < 100 -> 50
-            queueSize < 1000 -> 100
-            else -> 500
+        try {
+            db.insertTrafficBatch(batch)
+            processed.addAndGet(batch.size.toLong())
+        } catch (e: Exception) {
+            logging.logToError("Batch insert failed (${batch.size} records): ${e.message}")
+            errors.addAndGet(batch.size.toLong())
         }
     }
 
     private fun drainRemaining() {
-        val remaining = mutableListOf<QueueItem>()
+        val remaining = mutableListOf<TrafficItem>()
         queue.drainTo(remaining)
-
         if (remaining.isNotEmpty()) {
-            logging.logToOutput("Draining ${remaining.size} remaining traffic items...")
-            processBatch(remaining)
-            processed.addAndGet(remaining.size.toLong())
+            logging.logToOutput("Flushing ${remaining.size} remaining traffic records...")
+            flushBatch(remaining)
         }
     }
 
-    /**
-     * Get queue statistics.
-     */
     fun getStats(): QueueStats {
         return QueueStats(
             queueSize = queue.size,
@@ -193,34 +135,27 @@ class TrafficQueue(
     }
 
     override fun close() {
-        running.set(false)
-
-        // Wait for writer thread to finish (with timeout)
+        running = false
         try {
-            writerThread.join(5000)
+            writerThread.join(SHUTDOWN_TIMEOUT_MS)
             if (writerThread.isAlive) {
                 logging.logToError("Traffic writer thread did not stop gracefully")
                 writerThread.interrupt()
             }
-        } catch (e: InterruptedException) {
+        } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
-
         logging.logToOutput("Traffic queue closed. Stats: ${getStats()}")
     }
-}
 
-/**
- * Items that can be queued for processing.
- */
-sealed class QueueItem {
-    data class Request(val item: TrafficItem) : QueueItem()
-    data class ResponseUpdate(
-        val requestHash: String,
-        val statusCode: Int,
-        val responseHeaders: String,
-        val responseBody: ByteArray?
-    ) : QueueItem()
+    companion object {
+        private const val QUEUE_CAPACITY = 50_000
+        private const val BATCH_SIZE = 500
+        private const val POLL_TIMEOUT_SECONDS = 2L
+        private const val SHUTDOWN_TIMEOUT_MS = 10_000L
+        private const val DROP_LOG_INTERVAL = 1000L
+        private const val FLUSH_TIMEOUT_MS = 10_000L
+    }
 }
 
 data class QueueStats(

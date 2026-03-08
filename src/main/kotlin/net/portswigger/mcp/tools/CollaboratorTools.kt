@@ -6,15 +6,22 @@ import burp.api.montoya.collaborator.Interaction
 import burp.api.montoya.collaborator.SecretKey
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.Serializable
+import net.portswigger.mcp.database.CollaboratorEvent
+import net.portswigger.mcp.database.DatabaseService
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 
 // Store active collaborator clients for polling
 private val collaboratorClients = ConcurrentHashMap<String, CollaboratorClient>()
 
+private fun collabNow(): String = Instant.now().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
+
 /**
  * Register Burp Collaborator tools for out-of-band testing.
  */
-fun Server.registerCollaboratorTools(api: MontoyaApi) {
+fun Server.registerCollaboratorTools(api: MontoyaApi, db: DatabaseService? = null) {
 
     mcpTool<CollaboratorStatus>(
         "Check if Burp Collaborator is available and get server address."
@@ -49,6 +56,18 @@ fun Server.registerCollaboratorTools(api: MontoyaApi) {
 
             // Store the client for later polling
             collaboratorClients[clientId] = client
+
+            db?.let {
+                try {
+                    it.insertCollaboratorEvent(CollaboratorEvent(
+                        timestamp = collabNow(), eventType = "payload_generated",
+                        clientId = clientId, payloadUrl = payload.toString(),
+                        serverAddress = try { client.server().address() } catch (_: Exception) { null }
+                    ))
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log Collaborator payload: ${e.message}")
+                }
+            }
 
             buildString {
                 appendLine("=== Collaborator Payload Generated ===")
@@ -87,6 +106,19 @@ fun Server.registerCollaboratorTools(api: MontoyaApi) {
 
             collaboratorClients[clientId] = client
 
+            db?.let {
+                try {
+                    it.insertCollaboratorEvent(CollaboratorEvent(
+                        timestamp = collabNow(), eventType = "payload_generated",
+                        clientId = clientId, payloadUrl = payload.toString(),
+                        customData = customData,
+                        serverAddress = try { client.server().address() } catch (_: Exception) { null }
+                    ))
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log Collaborator payload: ${e.message}")
+                }
+            }
+
             buildString {
                 appendLine("=== Collaborator Payload Generated (with custom data) ===")
                 appendLine()
@@ -122,6 +154,29 @@ fun Server.registerCollaboratorTools(api: MontoyaApi) {
                     appendLine("- Ensure the payload was injected correctly")
                     appendLine("- Some payloads take time to execute (async operations)")
                     appendLine("- Check if the target can make outbound connections")
+                }
+            }
+
+            // Log all interactions to DB
+            db?.let {
+                try {
+                    val events = interactions.map { interaction ->
+                        CollaboratorEvent(
+                            timestamp = collabNow(),
+                            eventType = "interaction_received",
+                            clientId = clientId,
+                            interactionType = interaction.type().toString(),
+                            interactionId = interaction.id()?.toString(),
+                            dnsQuery = if (interaction.dnsDetails().isPresent) interaction.dnsDetails().get().query()?.toString() else null,
+                            dnsQueryType = if (interaction.dnsDetails().isPresent) interaction.dnsDetails().get().queryType()?.toString() else null,
+                            httpProtocol = if (interaction.httpDetails().isPresent) interaction.httpDetails().get().protocol()?.toString() else null,
+                            smtpProtocol = if (interaction.smtpDetails().isPresent) interaction.smtpDetails().get().protocol()?.toString() else null,
+                            customData = interaction.customData().orElse(null)?.toString()
+                        )
+                    }
+                    it.insertCollaboratorEventBatch(events)
+                } catch (e: Exception) {
+                    api.logging().logToError("Failed to log Collaborator interactions: ${e.message}")
                 }
             }
 

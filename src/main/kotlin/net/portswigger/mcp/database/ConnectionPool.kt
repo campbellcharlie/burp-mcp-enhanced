@@ -168,17 +168,15 @@ class ConnectionPool(
 
         // Apply SQLite optimizations
         conn.createStatement().use { stmt ->
-            // Performance PRAGMAs
+            // Performance PRAGMAs (tuned for extension use, not standalone server)
             stmt.execute("PRAGMA journal_mode = WAL")
             stmt.execute("PRAGMA synchronous = NORMAL")
-            stmt.execute("PRAGMA cache_size = -50000")  // 50MB cache
+            stmt.execute("PRAGMA cache_size = -8000")  // 8MB cache (matches sqlitedb_burp)
             stmt.execute("PRAGMA temp_store = MEMORY")
-            stmt.execute("PRAGMA mmap_size = 268435456")  // 256MB mmap
 
             // Reliability PRAGMAs
-            stmt.execute("PRAGMA busy_timeout = 5000")  // 5s wait on lock
+            stmt.execute("PRAGMA busy_timeout = 5000")
             stmt.execute("PRAGMA foreign_keys = ON")
-            stmt.execute("PRAGMA wal_autocheckpoint = 1000")
         }
 
         return conn

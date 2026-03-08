@@ -1,7 +1,7 @@
 package net.portswigger.mcp.config
 
 import burp.api.montoya.logging.Logging
-import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.persistence.Preferences
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test
 
 class McpConfigTest {
 
-    private lateinit var persistedObject: PersistedObject
+    private lateinit var preferences: Preferences
     private lateinit var config: McpConfig
     private lateinit var mockLogging: Logging
 
@@ -19,7 +19,7 @@ class McpConfigTest {
     fun setup() {
         val storage = mutableMapOf<String, Any>()
 
-        persistedObject = mockk<PersistedObject>().apply {
+        preferences = mockk<Preferences>().apply {
             every { getBoolean(any()) } answers {
                 val key = firstArg<String>()
                 storage[key] as? Boolean ?: when (key) {
@@ -45,7 +45,7 @@ class McpConfigTest {
             every { logToError(any<String>()) } returns Unit
         }
 
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(preferences, mockLogging)
     }
 
     @Test
@@ -54,7 +54,7 @@ class McpConfigTest {
 
         assertTrue(result)
         assertEquals("example.com", config.autoApproveTargets)
-        verify { persistedObject.setString("_autoApproveTargets", "example.com") }
+        verify { preferences.setString("_autoApproveTargets", "example.com") }
     }
 
     @Test
@@ -132,7 +132,7 @@ class McpConfigTest {
     @Test
     fun `getAutoApproveTargetsList should parse comma-separated values`() {
         val storage = mutableMapOf<String, Any>("_autoApproveTargets" to "example.com,test.org,*.api.com")
-        persistedObject = mockk<PersistedObject>().apply {
+        val tempPreferences = mockk<Preferences>().apply {
             every { getBoolean(any()) } answers { storage[firstArg()] as? Boolean ?: false }
             every { getString(any()) } answers { storage[firstArg()] as? String ?: "" }
             every { getInteger(any()) } answers { storage[firstArg()] as? Int ?: 0 }
@@ -146,7 +146,7 @@ class McpConfigTest {
                 storage[firstArg()] = secondArg<Int>()
             }
         }
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(tempPreferences, mockLogging)
 
         assertEquals(
             listOf("example.com", "test.org", "*.api.com"), config.getAutoApproveTargetsList()
@@ -156,7 +156,7 @@ class McpConfigTest {
     @Test
     fun `getAutoApproveTargetsList should handle malformed input`() {
         val storage = mutableMapOf<String, Any>("_autoApproveTargets" to "example.com,,  ,test.org")
-        persistedObject = mockk<PersistedObject>().apply {
+        val tempPreferences = mockk<Preferences>().apply {
             every { getBoolean(any()) } answers { storage[firstArg()] as? Boolean ?: false }
             every { getString(any()) } answers { storage[firstArg()] as? String ?: "" }
             every { getInteger(any()) } answers { storage[firstArg()] as? Int ?: 0 }
@@ -170,7 +170,7 @@ class McpConfigTest {
                 storage[firstArg()] = secondArg<Int>()
             }
         }
-        config = McpConfig(persistedObject, mockLogging)
+        config = McpConfig(tempPreferences, mockLogging)
 
         assertEquals(
             listOf("example.com", "test.org"), config.getAutoApproveTargetsList()
@@ -230,11 +230,11 @@ class McpConfigTest {
 
         config.configEditingTooling = true
         assertTrue(config.configEditingTooling)
-        verify { persistedObject.setBoolean("configEditingTooling", true) }
+        verify { preferences.setBoolean("configEditingTooling", true) }
 
         config.configEditingTooling = false
         assertFalse(config.configEditingTooling)
-        verify { persistedObject.setBoolean("configEditingTooling", false) }
+        verify { preferences.setBoolean("configEditingTooling", false) }
     }
 
     @Test
@@ -243,10 +243,10 @@ class McpConfigTest {
 
         config.requireHttpRequestApproval = false
         assertFalse(config.requireHttpRequestApproval)
-        verify { persistedObject.setBoolean("requireHttpRequestApproval", false) }
+        verify { preferences.setBoolean("requireHttpRequestApproval", false) }
 
         config.requireHttpRequestApproval = true
         assertTrue(config.requireHttpRequestApproval)
-        verify { persistedObject.setBoolean("requireHttpRequestApproval", true) }
+        verify { preferences.setBoolean("requireHttpRequestApproval", true) }
     }
 }

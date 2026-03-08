@@ -1,6 +1,7 @@
 package net.portswigger.mcp.tools
 
 import burp.api.montoya.MontoyaApi
+import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.requests.HttpRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -82,7 +83,7 @@ fun Server.registerGraphqlTools(api: MontoyaApi) {
                 // Use GET request with query parameter
                 val encoded = java.net.URLEncoder.encode(FULL_INTROSPECTION_QUERY, "UTF-8")
                 val request = HttpRequest.httpRequest(service, "GET $path?query=$encoded HTTP/1.1\r\nHost: ${service.host()}\r\n${formatHeaders(headers)}\r\n")
-                api.http().sendRequest(request)
+                api.http().sendRequest(request, HttpMode.HTTP_1)
             } else {
                 val body = json.encodeToString(
                     buildJsonObject {
@@ -106,7 +107,7 @@ fun Server.registerGraphqlTools(api: MontoyaApi) {
                     append(body)
                 }
 
-                api.http().sendRequest(HttpRequest.httpRequest(service, requestStr.replace("\n", "\r\n")))
+                api.http().sendRequest(HttpRequest.httpRequest(service, requestStr.replace("\n", "\r\n")), HttpMode.HTTP_1)
             }
         } catch (e: Exception) {
             return@mcpTool "Request failed: ${e.message}"

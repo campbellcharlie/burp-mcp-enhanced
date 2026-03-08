@@ -1,0 +1,49 @@
+=== Burp Scanner Integration ===
+
+Requires Burp Suite Professional.
+
+--- TOOLS ---
+
+  start_active_scan(host?, port?, usesHttps?, requestContent?, configuration?)
+    Launch active scan against a target.
+    configuration: "active" (default) or "passive"
+    Runs asynchronously -- check Burp UI for progress.
+
+  start_crawl(seedUrl)
+    Crawl from a seed URL. Results appear in Burp's Site map.
+
+  get_scanner_issues(host?, severityFilter?, limit?, offset?)
+    Get scanner findings, optionally filtered.
+    severityFilter: HIGH, MEDIUM, LOW, INFORMATION
+
+  get_scanner_issues_by_host(host)
+    Get all issues for a specific host.
+
+  get_all_scanner_issues()
+    Get all scanner issues across all targets.
+
+  list_active_scans()
+    List MCP-initiated scans with status.
+
+  clear_mcp_scans()
+    Clear MCP scan tracking. Does not stop actual scans.
+
+--- WORKFLOW ---
+
+  1. Start scan:
+     start_active_scan(host="target.com", usesHttps=true)
+     -- or --
+     start_crawl(seedUrl="https://target.com")
+
+  2. Monitor: Check Burp UI for scan progress.
+
+  3. Review findings:
+     get_scanner_issues(host="target.com", severityFilter="HIGH")
+
+  4. Investigate findings:
+     get_traffic_by_id(id=ISSUE_TRAFFIC_ID)
+     -> Inspect full request/response for each finding
+
+  5. Manual follow-up:
+     Use scanner findings to guide manual testing.
+     Scanner detects -- you escalate and exploit.

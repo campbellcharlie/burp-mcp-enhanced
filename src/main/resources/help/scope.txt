@@ -1,0 +1,36 @@
+=== Target Scope Management ===
+
+Manage Burp's target scope to control which hosts are in-scope for testing.
+
+--- TOOLS ---
+
+  is_in_scope(url)
+    Check if a URL is in Burp's target scope.
+
+  add_to_scope(url)
+    Add URL to scope. Derives inclusion rules from the URL.
+
+  remove_from_scope(url)
+    Remove URL from scope.
+
+  check_scope_multiple(urls)
+    Batch scope check for a list of URLs.
+
+--- USAGE ---
+
+  Before testing, add targets:
+    add_to_scope(url="https://target.com")
+
+  Verify scope:
+    is_in_scope(url="https://target.com/api/users")
+    check_scope_multiple(urls=["https://target.com/api", "https://other.com"])
+
+  Constrain testing:
+    Only test hosts that are in scope. Use check_scope_multiple to verify
+    before sending requests to discovered endpoints.
+
+--- BEST PRACTICES ---
+
+  - Add scope at the start of every assessment
+  - Verify third-party domains are out of scope before testing
+  - Host-scoped only -- no subdomain enumeration unless authorized
