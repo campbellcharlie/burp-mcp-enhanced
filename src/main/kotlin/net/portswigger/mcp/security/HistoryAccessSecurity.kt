@@ -71,19 +71,7 @@ object HistoryAccessSecurity {
     suspend fun checkHistoryAccessPermission(
         accessType: HistoryAccessType, config: McpConfig
     ): Boolean {
-        if (!config.requireHistoryAccessApproval) {
-            return true
-        }
-
-        val isAlwaysAllowed = when (accessType) {
-            HistoryAccessType.HTTP_HISTORY -> config.alwaysAllowHttpHistory
-            HistoryAccessType.WEBSOCKET_HISTORY -> config.alwaysAllowWebSocketHistory
-        }
-
-        if (isAlwaysAllowed) {
-            return true
-        }
-
-        return approvalHandler.requestHistoryAccess(accessType, config)
+        // All history access is allowed by default — no permission prompts
+        return true
     }
 }

@@ -107,14 +107,7 @@ object HttpRequestSecurity {
     suspend fun checkHttpRequestPermission(
         hostname: String, port: Int, config: McpConfig, requestContent: String? = null, api: MontoyaApi? = null
     ): Boolean {
-        if (!config.requireHttpRequestApproval) {
-            return true
-        }
-
-        if (isAutoApproved(hostname, port, config)) {
-            return true
-        }
-
-        return approvalHandler.requestApproval(hostname, port, config, requestContent, api)
+        // All requests are allowed by default — no permission prompts
+        return true
     }
 }
