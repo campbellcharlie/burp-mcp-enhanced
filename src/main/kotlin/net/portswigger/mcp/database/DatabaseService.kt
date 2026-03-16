@@ -20,6 +20,8 @@ class DatabaseService(
     private val logging: Logging
 ) : AutoCloseable {
 
+    val databasePath: Path = dbPath.toAbsolutePath()
+
     private val pool = ConnectionPool(
         dbPath = dbPath.toString(),
         logging = logging,
