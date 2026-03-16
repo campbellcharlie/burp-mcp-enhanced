@@ -127,7 +127,7 @@ class KtorServerManager(
                     }
                     mcpServer.registerRaceTools(api)
                     mcpServer.registerJwtTools()
-                    mcpServer.registerDiffTools()
+                    mcpServer.registerDiffTools(api)
                     mcpServer.registerGraphqlTools(api)
                     mcpServer.registerCollaboratorTools(api, db)
 
@@ -137,11 +137,17 @@ class KtorServerManager(
                     mcpServer.registerScannerTools(api)  // Professional only - checks edition internally
                     mcpServer.registerHelpTools()
                     mcpServer.registerTemplateTools(api, config, db)
+                    mcpServer.registerBurpInfoTools(api)
+                    mcpServer.registerCookieJarTools(api)
+                    mcpServer.registerBCheckTools(api)
                 }.apply {
                     start(wait = false)
                 }
 
                 api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
+                if (db != null) {
+                    api.logging().logToOutput("SQLite database: ${db.databasePath}")
+                }
                 callback(ServerState.Running)
 
             } catch (e: Exception) {

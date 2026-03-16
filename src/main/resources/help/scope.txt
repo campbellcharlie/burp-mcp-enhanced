@@ -16,6 +16,17 @@ Manage Burp's target scope to control which hosts are in-scope for testing.
   check_scope_multiple(urls)
     Batch scope check for a list of URLs.
 
+  get_scope_rules()
+    View all current include/exclude scope rules from Burp's project config.
+
+  import_scope_bulk(entries)
+    Add multiple URLs to scope in bulk.
+    entries: list of {url, type} where type is "include" or "exclude".
+    Example: import_scope_bulk(entries=[{url:"https://a.com",type:"include"},{url:"https://b.com",type:"exclude"}])
+
+  reset_scope(confirm)
+    Clear ALL scope rules. Requires confirm=true as a safety gate.
+
 --- USAGE ---
 
   Before testing, add targets:
@@ -29,8 +40,17 @@ Manage Burp's target scope to control which hosts are in-scope for testing.
     Only test hosts that are in scope. Use check_scope_multiple to verify
     before sending requests to discovered endpoints.
 
+  Bulk import and review:
+    import_scope_bulk(entries=[{url:"https://target1.com",type:"include"},{url:"https://cdn.target1.com",type:"exclude"}])
+    get_scope_rules()
+
+  Reset scope between engagements:
+    reset_scope(confirm=true)
+
 --- BEST PRACTICES ---
 
   - Add scope at the start of every assessment
+  - Use get_scope_rules() to verify scope configuration before testing
+  - Use import_scope_bulk for multi-host engagements
   - Verify third-party domains are out of scope before testing
   - Host-scoped only -- no subdomain enumeration unless authorized

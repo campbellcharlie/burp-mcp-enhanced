@@ -1,5 +1,7 @@
 package net.portswigger.mcp.tools
 
+import burp.api.montoya.MontoyaApi
+import burp.api.montoya.http.message.responses.HttpResponse
 import com.github.difflib.DiffUtils
 import com.github.difflib.UnifiedDiffUtils
 import com.jayway.jsonpath.JsonPath
@@ -11,7 +13,7 @@ import java.util.regex.Pattern
 /**
  * Register response comparison and extraction tools.
  */
-fun Server.registerDiffTools() {
+fun Server.registerDiffTools(api: MontoyaApi) {
 
     mcpTool<CompareResponses>(
         "Compare two HTTP responses and show differences. " +
@@ -199,6 +201,93 @@ fun Server.registerDiffTools() {
         }
     }
 
+    mcpTool<AnalyzeResponseVariations>(
+        "Analyze multiple HTTP responses using Burp's response variation analyzer. " +
+        "Identifies which attributes vary and which stay consistent across responses. " +
+        "Useful for detecting differences in responses for content discovery or auth testing."
+    ) {
+        if (responses.size < 2) {
+            return@mcpTool "At least 2 responses are required for variation analysis"
+        }
+
+        try {
+            val analyzer = api.http().createResponseVariationsAnalyzer()
+
+            responses.forEach { rawResponse ->
+                val httpResponse = HttpResponse.httpResponse(rawResponse)
+                analyzer.updateWith(httpResponse)
+            }
+
+            val variant = analyzer.variantAttributes()
+            val invariant = analyzer.invariantAttributes()
+
+            buildString {
+                appendLine("=== Response Variation Analysis (${responses.size} responses) ===")
+                appendLine()
+                appendLine("Variant attributes (changed between responses): ${variant.size}")
+                if (variant.isNotEmpty()) {
+                    variant.forEach { appendLine("  - $it") }
+                } else {
+                    appendLine("  (none — responses are identical)")
+                }
+                appendLine()
+                appendLine("Invariant attributes (consistent across responses): ${invariant.size}")
+                if (invariant.isNotEmpty()) {
+                    invariant.forEach { appendLine("  - $it") }
+                } else {
+                    appendLine("  (none)")
+                }
+            }
+        } catch (e: Exception) {
+            "Error analyzing response variations: ${e.message}"
+        }
+    }
+
+    mcpTool<AnalyzeResponseKeywords>(
+        "Analyze multiple HTTP responses to determine which keywords appear consistently " +
+        "and which vary. Useful for content discovery — pick keywords from a known response " +
+        "and see which survive across different inputs."
+    ) {
+        if (responses.size < 2) {
+            return@mcpTool "At least 2 responses are required for keyword analysis"
+        }
+        if (keywords.isEmpty()) {
+            return@mcpTool "At least 1 keyword is required"
+        }
+
+        try {
+            val analyzer = api.http().createResponseKeywordsAnalyzer(keywords)
+
+            responses.forEach { rawResponse ->
+                val httpResponse = HttpResponse.httpResponse(rawResponse)
+                analyzer.updateWith(httpResponse)
+            }
+
+            val variant = analyzer.variantKeywords()
+            val invariant = analyzer.invariantKeywords()
+
+            buildString {
+                appendLine("=== Response Keyword Analysis (${responses.size} responses, ${keywords.size} keywords) ===")
+                appendLine()
+                appendLine("Variant keywords (presence changed): ${variant.size}")
+                if (variant.isNotEmpty()) {
+                    variant.forEach { appendLine("  - $it") }
+                } else {
+                    appendLine("  (none)")
+                }
+                appendLine()
+                appendLine("Invariant keywords (consistently present): ${invariant.size}")
+                if (invariant.isNotEmpty()) {
+                    invariant.forEach { appendLine("  - $it") }
+                } else {
+                    appendLine("  (none)")
+                }
+            }
+        } catch (e: Exception) {
+            "Error analyzing response keywords: ${e.message}"
+        }
+    }
+
     mcpTool<AnalyzeResponse>(
         "Analyze an HTTP response for security-relevant information. " +
         "Extracts headers, cookies, tokens, and potential vulnerabilities."
@@ -361,4 +450,15 @@ data class ExtractBetween(
 @Serializable
 data class AnalyzeResponse(
     val response: String
+)
+
+@Serializable
+data class AnalyzeResponseVariations(
+    val responses: List<String>
+)
+
+@Serializable
+data class AnalyzeResponseKeywords(
+    val responses: List<String>,
+    val keywords: List<String>
 )

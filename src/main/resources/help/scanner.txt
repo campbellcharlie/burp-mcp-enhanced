@@ -28,6 +28,21 @@ Requires Burp Suite Professional.
   clear_mcp_scans()
     Clear MCP scan tracking. Does not stop actual scans.
 
+  generate_scan_report(format?, severityFilter?, hostFilter?, outputPath?)
+    Generate an HTML or XML scan report from scanner issues.
+    format: "HTML" (default) or "XML"
+    severityFilter: "HIGH", "MEDIUM", "LOW", "INFORMATION"
+    hostFilter: filter issues by host substring
+    Returns the file path of the generated report.
+
+  import_bcheck(script, enabled?)
+    Import a BCheck script into Burp Scanner.
+    enabled: true (default) — whether the BCheck is active after import.
+
+  validate_bcheck(script)
+    Validate a BCheck script for prohibited patterns and basic structure.
+    Available in all editions (no Professional requirement).
+
 --- WORKFLOW ---
 
   1. Start scan:
@@ -44,6 +59,13 @@ Requires Burp Suite Professional.
      get_traffic_by_id(id=ISSUE_TRAFFIC_ID)
      -> Inspect full request/response for each finding
 
-  5. Manual follow-up:
+  5. Generate report:
+     generate_scan_report(format="HTML", severityFilter="HIGH")
+
+  6. BChecks:
+     validate_bcheck(script="...")
+     import_bcheck(script="...", enabled=true)
+
+  7. Manual follow-up:
      Use scanner findings to guide manual testing.
      Scanner detects -- you escalate and exploit.

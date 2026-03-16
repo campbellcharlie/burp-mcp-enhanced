@@ -26,7 +26,7 @@ VULNERABILITY CLASSES
   detection       Vulnerability detection patterns — error messages, success indicators
   payloads        Ready-to-use payloads by vulnerability class with bypass techniques
 
-TOOL INVENTORY (60+ tools)
+TOOL INVENTORY (70+ tools)
 
   HTTP Requests     send_http1_request  send_http1_request_raw
                     send_http2_request  send_http2_request_raw
@@ -47,14 +47,20 @@ TOOL INVENTORY (60+ tools)
                     jwt_key_confusion  jwt_bruteforce
   GraphQL           graphql_introspect  graphql_build_query  graphql_suggest_payloads
   Response          compare_responses  analyze_response
+                    analyze_response_variations  analyze_response_keywords
                     extract_regex  extract_json_path  extract_between
   Scanner           get_scanner_issues  get_scanner_issues_by_host
                     get_all_scanner_issues  start_active_scan
                     start_crawl  list_active_scans  clear_mcp_scans
+                    generate_scan_report
   Scope             is_in_scope  add_to_scope  remove_from_scope
-                    check_scope_multiple
+                    check_scope_multiple  get_scope_rules
+                    import_scope_bulk  reset_scope
   Site Map          get_site_map_urls  get_site_map_item
                     search_site_map  add_to_site_map
+  Burp Info         get_burp_info
+  Cookie Jar        get_cookie_jar  set_cookie
+  BChecks           validate_bcheck  import_bcheck
   Encoding          url_encode  url_decode  base64_encode  base64_decode
                     generate_random_string
   Burp UI           create_repeater_tab  send_to_intruder

@@ -6,11 +6,15 @@ import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.scanner.AuditConfiguration
 import burp.api.montoya.scanner.BuiltInAuditConfiguration
 import burp.api.montoya.scanner.CrawlConfiguration
+import burp.api.montoya.scanner.ReportFormat
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.schema.toSerializableForm
+import java.nio.file.Path
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 
 private val json = Json { prettyPrint = true }
@@ -195,6 +199,68 @@ fun Server.registerScannerTools(api: MontoyaApi) {
         activeScans.clear()
         "Cleared $count MCP-tracked scan references"
     }
+
+    mcpTool<GenerateScanReport>(
+        "Generate a scan report (HTML or XML) from scanner issues. " +
+        "Can filter by severity and host. Returns the file path of the generated report."
+    ) {
+        try {
+            val issues = api.siteMap().issues()
+
+            // Apply filters
+            var filtered = issues.toList()
+
+            if (severityFilter != null) {
+                filtered = filtered.filter {
+                    it.severity().name.equals(severityFilter, ignoreCase = true)
+                }
+            }
+
+            if (hostFilter != null) {
+                filtered = filtered.filter {
+                    it.httpService()?.host()?.contains(hostFilter, ignoreCase = true) == true
+                }
+            }
+
+            if (filtered.isEmpty()) {
+                return@mcpTool buildString {
+                    append("No issues found")
+                    if (severityFilter != null) append(" with severity=$severityFilter")
+                    if (hostFilter != null) append(" for host=$hostFilter")
+                }
+            }
+
+            // Determine format
+            val reportFormat = when (format.uppercase()) {
+                "XML" -> ReportFormat.XML
+                else -> ReportFormat.HTML
+            }
+
+            val ext = if (reportFormat == ReportFormat.XML) "xml" else "html"
+
+            // Determine output path
+            val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+            val filePath = if (outputPath != null) {
+                Path.of(outputPath)
+            } else {
+                Path.of(System.getProperty("java.io.tmpdir"), "burp_report_${timestamp}.$ext")
+            }
+
+            api.scanner().generateReport(filtered, reportFormat, filePath)
+
+            buildString {
+                appendLine("=== Scan Report Generated ===")
+                appendLine()
+                appendLine("Format: $reportFormat")
+                appendLine("Issues: ${filtered.size}")
+                appendLine("Output: $filePath")
+                if (severityFilter != null) appendLine("Severity filter: $severityFilter")
+                if (hostFilter != null) appendLine("Host filter: $hostFilter")
+            }
+        } catch (e: Exception) {
+            "Error generating report: ${e.message}"
+        }
+    }
 }
 
 // ============== Data Classes ==============
@@ -233,4 +299,12 @@ data class GetScannerIssuesByHost(
 @Serializable
 data class ClearMcpScans(
     val dummy: String = ""
+)
+
+@Serializable
+data class GenerateScanReport(
+    val format: String = "HTML", // "HTML" or "XML"
+    val severityFilter: String? = null, // "HIGH", "MEDIUM", "LOW", "INFORMATION"
+    val hostFilter: String? = null,
+    val outputPath: String? = null
 )
